@@ -1,13 +1,12 @@
 import logging
 import os
 
+from auth0_api_python import ApiClient, ApiClientOptions
+from auth0_api_python.errors import VerifyAccessTokenError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
-
-from auth0_api_python import ApiClient, ApiClientOptions
-from auth0_api_python.errors import VerifyAccessTokenError
 
 logger = logging.getLogger(__name__)
 
