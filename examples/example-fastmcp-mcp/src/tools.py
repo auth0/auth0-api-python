@@ -1,8 +1,9 @@
 from json import dumps as jsonDumps
-from .mcp import mcp
-from .auth0.tools import get_auth_info
+
 from mcp.server.fastmcp import Context
-from .auth0.tools import create_scoped_tool_decorator
+
+from .auth0.tools import create_scoped_tool_decorator, get_auth_info
+from .mcp import mcp
 
 # Create a scoped_tool decorator bound to the mcp instance
 scoped_tool = create_scoped_tool_decorator(mcp)

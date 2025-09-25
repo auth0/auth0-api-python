@@ -1,11 +1,11 @@
-import os
-import logging
 import contextlib
+import logging
+import os
 from collections.abc import AsyncIterator
 
 from starlette.applications import Starlette
-from starlette.routing import Mount
 from starlette.middleware.cors import CORSMiddleware
+from starlette.routing import Mount
 
 from .auth0 import Auth0Mcp
 from .mcp import mcp
@@ -22,7 +22,7 @@ async def lifespan(app: Starlette) -> AsyncIterator[None]:
         await stack.enter_async_context(mcp.session_manager.run())
 
         # Import tools here to ensure tools are loaded after mcp is initialized
-        from . import tools
+        from . import tools  # noqa: F401, I001
         yield
 
 starlette_app = Starlette(

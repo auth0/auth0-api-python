@@ -3,24 +3,27 @@ Scope-based auth decorators for MCP tools.
 
 Provides a decorator with Auth0 scope checking for MCP tools.
 """
-from functools import wraps
-from typing import List, Callable
 import asyncio
+from functools import wraps
+from typing import Callable
+
+from mcp.server.fastmcp import Context
+
 
 def create_scoped_tool_decorator(mcp_server):
     """Factory function to create a scoped_tool decorator bound to a MCP server instance."""
-    
+
     def scoped_tool(
-        required_scopes: List[str],
+        required_scopes: list[str],
         **tool_kwargs
     ):
         """
         Decorator that combines FastMCP tool registration with Auth0 scope checking.
-        
+
         Args:
             required_scopes: List of scopes required to use this tool
             **tool_kwargs: Additional parameters passed to @mcp.tool()
-        
+
         Example:
             @scoped_tool(required_scopes=["read:data", "write:data"])
             def sensitive_tool(data: str, ctx: Context) -> str:
@@ -31,8 +34,8 @@ def create_scoped_tool_decorator(mcp_server):
             async def scope_checked_wrapper(*args, **kwargs):
                 # Find the Context parameter in kwargs
                 ctx = None
-                for key, value in kwargs.items():
-                    if hasattr(value, 'request_context') and hasattr(value, 'fastmcp'):
+                for value in kwargs.values():
+                    if isinstance(value, Context):
                         ctx = value
                         break
 
@@ -60,7 +63,7 @@ def create_scoped_tool_decorator(mcp_server):
 
                     # Log successful scope check
                     await ctx.info(f"Tool '{func.__name__}' authorized for client '{client_id}' with scopes: {user_scopes}")
-                    
+
                 except Exception as e:
                     # Log other unexpected errors and wrap them
                     await ctx.error(f"Authorization check failed for tool '{func.__name__}': {str(e)}")

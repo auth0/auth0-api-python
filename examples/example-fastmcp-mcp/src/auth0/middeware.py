@@ -1,5 +1,6 @@
 import logging
 import os
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -52,7 +53,7 @@ class Auth0Middleware(BaseHTTPMiddleware):
             auth_data = {
                 "token": token,
                 "client_id": clientId,
-                "scopes": decoded_and_verified_token.get("scope", "").split() 
+                "scopes": decoded_and_verified_token.get("scope", "").split()
                          if decoded_and_verified_token.get("scope") else []
             }
 
