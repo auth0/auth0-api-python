@@ -10,7 +10,7 @@ from typing import Callable
 from mcp.server.fastmcp import Context
 
 
-def create_scoped_tool_decorator(mcp_server):
+def create_scoped_tool_decorator(auth0Mcp):
     """Factory function to create a scoped_tool decorator bound to a MCP server instance."""
 
     def scoped_tool(
@@ -29,6 +29,11 @@ def create_scoped_tool_decorator(mcp_server):
             def sensitive_tool(data: str, ctx: Context) -> str:
                 return f"Processing: {data}"
         """
+
+        if required_scopes:
+            # register scopes for PRM
+            auth0Mcp.register_scopes(required_scopes)
+
         def decorator(func: Callable) -> Callable:
             @wraps(func)
             async def scope_checked_wrapper(*args, **kwargs):
@@ -76,7 +81,7 @@ def create_scoped_tool_decorator(mcp_server):
                     return func(*args, **kwargs)
 
             # Register the wrapped function as an MCP tool
-            mcp_server.add_tool(
+            auth0Mcp.mcp.add_tool(
                 scope_checked_wrapper,
                 **tool_kwargs
             )

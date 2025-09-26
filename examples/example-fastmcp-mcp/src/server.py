@@ -9,7 +9,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.routing import Mount
 
 from .auth0 import Auth0Mcp
-from .mcp import mcp
+from .tools import register_tools
 
 load_dotenv()
 
@@ -22,14 +22,12 @@ auth0_mcp = Auth0Mcp(
     audience=os.getenv("AUTH0_AUDIENCE"),
     domain=os.getenv("AUTH0_DOMAIN")
 )
+register_tools(auth0_mcp)
 
 @contextlib.asynccontextmanager
 async def lifespan(app: Starlette) -> AsyncIterator[None]:
     async with contextlib.AsyncExitStack() as stack:
-        await stack.enter_async_context(mcp.session_manager.run())
-
-        # Import tools here to ensure tools are loaded after mcp is initialized
-        from . import tools  # noqa: F401, I001
+        await stack.enter_async_context(auth0_mcp.mcp.session_manager.run())
         yield
 
 starlette_app = Starlette(
@@ -41,7 +39,7 @@ starlette_app = Starlette(
         # Main MCP app route with authentication middleware
         Mount(
             "/",
-            app=mcp.streamable_http_app(),
+            app=auth0_mcp.mcp.streamable_http_app(),
             middleware=auth0_mcp.auth_middleware()
         ),
     ],
