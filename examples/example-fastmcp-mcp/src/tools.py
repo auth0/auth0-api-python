@@ -4,6 +4,7 @@ from mcp.server.fastmcp import Context
 
 from .auth0.tools import create_scoped_tool_decorator, get_auth_info
 
+
 def register_tools(auth0Mcp):
     """
     Register all tools with the MCP server.
