@@ -88,5 +88,5 @@ def create_scoped_tool_decorator(mcp_server):
 
 
 def get_auth_info(request) -> dict:
-    """Get authentication info from request."""
-    return request.scope.get("auth", {})
+    """Get authentication info from request state."""
+    return getattr(request.state, 'auth', {})

@@ -3,6 +3,7 @@ import logging
 import os
 from collections.abc import AsyncIterator
 
+from dotenv import load_dotenv
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.routing import Mount
@@ -10,11 +11,17 @@ from starlette.routing import Mount
 from .auth0 import Auth0Mcp
 from .mcp import mcp
 
+load_dotenv()
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-auth0_mcp = Auth0Mcp(name="Example FastMCP Server")
+auth0_mcp = Auth0Mcp(
+    name="Example FastMCP Server",
+    audience=os.getenv("AUTH0_AUDIENCE"),
+    domain=os.getenv("AUTH0_DOMAIN")
+)
 
 @contextlib.asynccontextmanager
 async def lifespan(app: Starlette) -> AsyncIterator[None]:
@@ -26,7 +33,7 @@ async def lifespan(app: Starlette) -> AsyncIterator[None]:
         yield
 
 starlette_app = Starlette(
-    debug=True,
+    debug=os.getenv("DEBUG", "true").lower() == "true",
     routes=[
         # Add discovery metadata route
         *auth0_mcp.auth_metadata_router().routes,

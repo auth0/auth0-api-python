@@ -13,14 +13,16 @@ logger = logging.getLogger(__name__)
 class Auth0Middleware(BaseHTTPMiddleware):
     """
     Middleware that requires a valid Bearer token in the Authorization header.
-    This will validate the token using Auth0 SDK Client and add the auth info to request.scope["auth"].
+    Validates the token using Auth0 SDK Client and stores auth info in request.state.auth.
     """
 
-    def __init__(self, app: ASGIApp):
+    def __init__(self, app: ASGIApp, domain: str, audience: str):
         super().__init__(app)
+        if not domain or not audience:
+            raise RuntimeError("domain and audience must be provided")
         self.client = ApiClient(ApiClientOptions(
-            domain=os.getenv("AUTH0_DOMAIN", "your-tenant.auth0.com"),
-            audience=os.getenv("AUTH0_AUDIENCE", "https://api.example.com")
+            domain=domain,
+            audience=audience
         ))
 
     async def dispatch(self, request: Request, call_next):
@@ -50,7 +52,6 @@ class Auth0Middleware(BaseHTTPMiddleware):
 
             # Set up authentication context
             auth_data = {
-                "token": token,
                 "client_id": clientId,
                 "scopes": decoded_and_verified_token.get("scope", "").split()
                          if decoded_and_verified_token.get("scope") else []
@@ -66,7 +67,7 @@ class Auth0Middleware(BaseHTTPMiddleware):
                     extra[field] = decoded_and_verified_token.get(field)
 
             auth_data["extra"] = extra
-            request.scope["auth"] = auth_data
+            request.state.auth = auth_data
 
             return await call_next(request)
         except VerifyAccessTokenError as e:

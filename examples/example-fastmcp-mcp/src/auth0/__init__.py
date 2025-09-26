@@ -5,35 +5,29 @@ This module provides Auth0 authentication and authorization for MCP servers,
 including token verification, middleware, and scoped tool decorators.
 """
 
-import os
-
-from dotenv import load_dotenv
 from mcp.server.auth.routes import create_protected_resource_routes
-from pydantic import AnyHttpUrl
 from starlette.middleware import Middleware
 from starlette.routing import Route, Router
 
-from .middeware import Auth0Middleware
+from .middleware import Auth0Middleware
 
-# Load environment variables
-load_dotenv()
 
 class Auth0Mcp:
-    def __init__(self, name: str):
+    def __init__(self, name: str, audience: str, domain: str):
         self.name = name
-        self.audience = os.getenv("AUTH0_AUDIENCE", "https://api.example.com")
-        self.domain = os.getenv("AUTH0_DOMAIN", "your-tenant.auth0.com")
+        self.audience = audience
+        self.domain = domain
+        if not self.audience or not self.domain:
+            raise RuntimeError("audience and domain must be provided")
 
     def auth_metadata_router(self) -> Router:
         """
         Returns a router that serves the OAuth Protected Resource Metadata
         at the standard endpoint: /.well-known/oauth-protected-resource
         """
-        routes: list[Route] = []
-
-        routes = create_protected_resource_routes(
-            resource_url=AnyHttpUrl(self.audience),
-            authorization_servers=[AnyHttpUrl(f"https://{self.domain}")],
+        routes: list[Route] = create_protected_resource_routes(
+            resource_url=self.audience,
+            authorization_servers=[f"https://{self.domain}"],
             scopes_supported=[
                 "openid",
                 "profile",
@@ -45,12 +39,4 @@ class Auth0Mcp:
         return Router(routes=routes)
 
     def auth_middleware(self) -> list[Middleware]:
-        middleware: list[Middleware] = []
-
-        middleware.append(
-            Middleware(
-                Auth0Middleware
-            )
-        )
-
-        return middleware
+        return [Middleware(Auth0Middleware, domain=self.domain, audience=self.audience)]

@@ -23,8 +23,7 @@ def echo(text: str) -> str:
     annotations={"readOnlyHint": True}
 )
 def greet(name: str, ctx: Context) -> str:
-    if not name or name.strip() == "":
-        name = "world"
+    name = (name or "").strip() or "world"
     request = ctx.request_context.request
     auth_info = get_auth_info(request)
     user_id = auth_info.get("extra", {}).get("sub")
