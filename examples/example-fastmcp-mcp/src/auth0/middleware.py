@@ -1,12 +1,12 @@
 import logging
-import os
 
 from auth0_api_python import ApiClient, ApiClientOptions
 from auth0_api_python.errors import VerifyAccessTokenError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
+
+from .errors import AuthenticationRequired, MalformedAuthorizationRequest
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +29,9 @@ class Auth0Middleware(BaseHTTPMiddleware):
         # Extract Authorization header
         auth_header = request.headers.get("authorization")
         if not auth_header:
-            return self._return_auth_error_response(status_code=401, error="Authentication required", description="Missing Authorization header")
+            raise AuthenticationRequired("Missing Authorization header")
         if not auth_header.lower().startswith("bearer "):
-            return self._return_auth_error_response(
-                status_code=401,
-                error="Authentication required",
-                description="Invalid Authorization header format"
-            )
+            raise MalformedAuthorizationRequest("Invalid Authorization header format")
 
         # Extract and verify token
         token = auth_header[7:] # Remove "Bearer " prefix
@@ -72,25 +68,8 @@ class Auth0Middleware(BaseHTTPMiddleware):
             return await call_next(request)
         except VerifyAccessTokenError as e:
             logger.error(f"Token verification failed: {str(e)}")
-            return self._return_auth_error_response(
-                status_code=401,
-                error="Authentication failed",
-                description="Invalid token"
-            )
+            raise AuthenticationRequired("Invalid token")
         except Exception as e:
             logger.error(f"Unexpected error in middleware: {str(e)}")
-            return self._return_auth_error_response(
-                status_code=500,
-                error="Internal Server Error",
-                description="Internal Server Error"
-            )
-
-    def _return_auth_error_response(self, status_code: int, error: str, description: str) -> JSONResponse:
-        www_auth_parts = [f'error="{error}"', f'error_description="{description}"', f'resource_metadata="{os.getenv("MCP_SERVER_URL")}"']
-        www_authenticate = f"Bearer {', '.join(www_auth_parts)}"
-
-        return JSONResponse(
-            status_code=status_code,
-            content={"error": error, "error_description": description},
-            headers={"WWW-Authenticate": www_authenticate}
-        )
+            # Re-raise unexpected errors to be handled by generic exception handler
+            raise

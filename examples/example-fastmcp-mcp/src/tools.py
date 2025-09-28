@@ -2,7 +2,7 @@ from json import dumps as jsonDumps
 
 from mcp.server.fastmcp import Context
 
-from .auth0.tools import create_scoped_tool_decorator, get_auth_info
+from .auth0.authz import require_scopes
 
 
 def register_tools(auth0Mcp):
@@ -10,8 +10,8 @@ def register_tools(auth0Mcp):
     Register all tools with the MCP server.
     """
     mcp = auth0Mcp.mcp
-    # Create a scoped_tool decorator bound to the mcp instance
-    scoped_tool = create_scoped_tool_decorator(auth0Mcp)
+    # Register scopes used by tools for Protected Resource Metadata
+    auth0Mcp.register_scopes(["tool:greet", "tool:whoami"])
 
     # Tool without required scopes
     @mcp.tool()
@@ -20,31 +20,29 @@ def register_tools(auth0Mcp):
         return text
 
     # A MCP tool with required scopes
-    @scoped_tool(
-        required_scopes=["tool:greet"],
+    @mcp.tool(
         name="greet",
         title="Greet Tool",
         description="Greets a user",
         annotations={"readOnlyHint": True}
     )
+    @require_scopes(["tool:greet"])
     def greet(name: str, ctx: Context) -> str:
         name = (name or "").strip() or "world"
-        request = ctx.request_context.request
-        auth_info = get_auth_info(request)
+        auth_info = ctx.request_context.request.state.auth
         user_id = auth_info.get("extra", {}).get("sub")
         return f"Hello, {name}! You are authenticated as {user_id}"
 
     # A MCP tool with required scopes
-    @scoped_tool(
-        required_scopes=["tool:whoami"],
+    @mcp.tool(
         name="whoami",
         title="Who Am I Tool",
         description="Returns information about the authenticated user",
         annotations={"readOnlyHint": True}
     )
+    @require_scopes(["tool:whoami"])
     def whoami(ctx: Context) -> str:
-        request = ctx.request_context.request
-        auth_info = get_auth_info(request)
+        auth_info = ctx.request_context.request.state.auth
 
         response_data = {
             "user": auth_info.get("extra", {}),

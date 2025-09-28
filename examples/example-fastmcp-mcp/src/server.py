@@ -44,6 +44,7 @@ starlette_app = Starlette(
         ),
     ],
     lifespan=lifespan,
+    exception_handlers=auth0_mcp.exception_handlers(),
 )
 
 # Wrap ASGI application with CORS middleware to expose Mcp-Session-Id header
