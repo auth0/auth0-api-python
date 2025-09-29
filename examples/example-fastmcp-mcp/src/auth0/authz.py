@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Iterable
 from functools import wraps
 
@@ -16,7 +15,7 @@ def require_scopes(required_scopes: Iterable[str]):
     Example:
       @mcp.tool(...)
       @require_scopes(["tool:greet", "tool:whoami"])
-      def my_tool(name: str, ctx: Context) -> str:
+      async def my_tool(name: str, ctx: Context) -> str:
         return f"Hello {name}!"
     """
     required_scopes_list = list(required_scopes)
@@ -37,10 +36,6 @@ def require_scopes(required_scopes: Iterable[str]):
             if missing_scopes:
                 raise InsufficientScope(f"Missing required scopes: {missing_scopes}")
 
-            # Call the original function
-            if asyncio.iscoroutinefunction(func):
-                return await func(*args, **kwargs)
-            else:
-                return func(*args, **kwargs)
+            return await func(*args, **kwargs)
         return wrapper
     return decorator

@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+
 class AuthenticationRequired(Exception):
     """
     Raised when authentication is required but missing.

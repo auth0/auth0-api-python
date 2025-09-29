@@ -5,6 +5,8 @@ This module provides Auth0 authentication and authorization for MCP servers,
 including token verification, middleware, and scoped tool decorators.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 from typing import Callable, Union
@@ -30,7 +32,7 @@ class Auth0Mcp:
         if not self.audience or not self.domain:
             raise RuntimeError("audience and domain must be provided")
         self.mcp = FastMCP(
-            name="Auth0 Protected MCP Server",
+            name=self.name,
             stateless_http=True,
         )
         self._scopes_supported = {
@@ -111,9 +113,9 @@ class Auth0Mcp:
         Build WWW-Authenticate header according to RFC 9728 Section 5.1.
         """
         www_auth_params = [f'error="{error_code}"', f'error_description="{description}"']
-
-        if include_resource_metadata:
-            metadata_url = f"{os.getenv('MCP_SERVER_URL')}/.well-known/oauth-protected-resource"
+        metadata_url = os.getenv('MCP_SERVER_URL')
+        if include_resource_metadata and metadata_url:
+            metadata_url = metadata_url.rstrip("/") + "/.well-known/oauth-protected-resource"
             www_auth_params.append(f'resource_metadata="{metadata_url}"')
 
         return f"Bearer {', '.join(www_auth_params)}"

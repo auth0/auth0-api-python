@@ -29,12 +29,12 @@ class Auth0Middleware(BaseHTTPMiddleware):
         # Extract Authorization header
         auth_header = request.headers.get("authorization")
         if not auth_header:
-            raise AuthenticationRequired("Missing Authorization header")
+            raise MalformedAuthorizationRequest("Missing Authorization header")
         if not auth_header.lower().startswith("bearer "):
             raise MalformedAuthorizationRequest("Invalid Authorization header format")
 
         # Extract and verify token
-        token = auth_header[7:] # Remove "Bearer " prefix
+        token = auth_header[7:].strip() # Remove "Bearer " prefix
         try:
             decoded_and_verified_token = await self.client.verify_access_token(
                 token,
@@ -42,21 +42,21 @@ class Auth0Middleware(BaseHTTPMiddleware):
             )
 
             # Check for client_id or azp
-            clientId = decoded_and_verified_token.get('client_id') or decoded_and_verified_token.get('azp')
-            if not clientId:
+            client_id = decoded_and_verified_token.get('client_id') or decoded_and_verified_token.get('azp')
+            if not client_id:
                 raise VerifyAccessTokenError("Token is missing 'client_id' or 'azp' claim")
 
             # Set up authentication context
             auth_data = {
-                "client_id": clientId,
+                "client_id": client_id,
                 "scopes": decoded_and_verified_token.get("scope", "").split()
                          if decoded_and_verified_token.get("scope") else []
             }
 
             if decoded_and_verified_token.get('exp'):
-                auth_data["expiresAt"] = decoded_and_verified_token.get('exp')
+                auth_data["expires_at"] = decoded_and_verified_token.get('exp')
 
-            extra = {"sub": decoded_and_verified_token.get('sub'), "client_id": clientId}
+            extra = {"sub": decoded_and_verified_token.get('sub'), "client_id": client_id}
 
             for field in ['azp', 'name', 'email']:
                 if decoded_and_verified_token.get(field):
@@ -66,10 +66,9 @@ class Auth0Middleware(BaseHTTPMiddleware):
             request.state.auth = auth_data
 
             return await call_next(request)
-        except VerifyAccessTokenError as e:
-            logger.error(f"Token verification failed: {str(e)}")
+        except VerifyAccessTokenError:
+            logger.info("Token verification failed")
             raise AuthenticationRequired("Invalid token")
-        except Exception as e:
-            logger.error(f"Unexpected error in middleware: {str(e)}")
-            # Re-raise unexpected errors to be handled by generic exception handler
+        except Exception:
+            logger.exception("Unexpected error in middleware")
             raise

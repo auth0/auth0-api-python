@@ -1,4 +1,4 @@
-from json import dumps as jsonDumps
+import json
 
 from mcp.server.fastmcp import Context
 
@@ -15,7 +15,7 @@ def register_tools(auth0Mcp):
 
     # Tool without required scopes
     @mcp.tool()
-    def echo(text: str) -> str:
+    async def echo(text: str) -> str:
         """Echoes the input text"""
         return text
 
@@ -27,7 +27,7 @@ def register_tools(auth0Mcp):
         annotations={"readOnlyHint": True}
     )
     @require_scopes(["tool:greet"])
-    def greet(name: str, ctx: Context) -> str:
+    async def greet(name: str, ctx: Context) -> str:
         name = (name or "").strip() or "world"
         auth_info = ctx.request_context.request.state.auth
         user_id = auth_info.get("extra", {}).get("sub")
@@ -41,11 +41,11 @@ def register_tools(auth0Mcp):
         annotations={"readOnlyHint": True}
     )
     @require_scopes(["tool:whoami"])
-    def whoami(ctx: Context) -> str:
+    async def whoami(ctx: Context) -> str:
         auth_info = ctx.request_context.request.state.auth
 
         response_data = {
             "user": auth_info.get("extra", {}),
             "scopes": auth_info.get("scopes", []),
         }
-        return jsonDumps(response_data, indent=2)
+        return json.dumps(response_data, indent=2)
