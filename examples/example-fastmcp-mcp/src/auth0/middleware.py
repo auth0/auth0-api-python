@@ -1,9 +1,12 @@
 import logging
+from collections.abc import Callable
+from typing import Any
 
 from auth0_api_python import ApiClient, ApiClientOptions
 from auth0_api_python.errors import VerifyAccessTokenError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+from starlette.responses import Response
 from starlette.types import ASGIApp
 
 from .errors import AuthenticationRequired, MalformedAuthorizationRequest
@@ -25,7 +28,33 @@ class Auth0Middleware(BaseHTTPMiddleware):
             audience=audience
         ))
 
-    async def dispatch(self, request: Request, call_next):
+    def _build_auth_data(self, token: dict[str, Any]) -> dict[str, Any]:
+        """Extract authentication data from verified token."""
+        client_id = token.get('client_id') or token.get('azp')
+        if not client_id:
+            raise VerifyAccessTokenError("Token missing 'client_id' or 'azp' claim")
+        
+        scopes = token.get("scope", "").split() if token.get("scope") else []
+        
+        auth_data = {
+            "client_id": client_id,
+            "scopes": scopes,
+        }
+        
+        if expires_at := token.get('exp'):
+            auth_data["expires_at"] = expires_at
+        
+        # Extract extra claims with dict comprehension
+        extra_fields = {'sub', 'azp', 'name', 'email', 'client_id'}
+        auth_data["extra"] = {
+            field: token[field]
+            for field in extra_fields
+            if field in token
+        }
+        
+        return auth_data
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
         # Extract Authorization header
         auth_header = request.headers.get("authorization")
         if not auth_header:
@@ -41,29 +70,8 @@ class Auth0Middleware(BaseHTTPMiddleware):
                 required_claims=["sub"]
             )
 
-            # Check for client_id or azp
-            client_id = decoded_and_verified_token.get('client_id') or decoded_and_verified_token.get('azp')
-            if not client_id:
-                raise VerifyAccessTokenError("Token is missing 'client_id' or 'azp' claim")
-
             # Set up authentication context
-            auth_data = {
-                "client_id": client_id,
-                "scopes": decoded_and_verified_token.get("scope", "").split()
-                         if decoded_and_verified_token.get("scope") else []
-            }
-
-            if decoded_and_verified_token.get('exp'):
-                auth_data["expires_at"] = decoded_and_verified_token.get('exp')
-
-            extra = {"sub": decoded_and_verified_token.get('sub'), "client_id": client_id}
-
-            for field in ['azp', 'name', 'email']:
-                if decoded_and_verified_token.get(field):
-                    extra[field] = decoded_and_verified_token.get(field)
-
-            auth_data["extra"] = extra
-            request.state.auth = auth_data
+            request.state.auth = self._build_auth_data(decoded_and_verified_token)
 
             return await call_next(request)
         except VerifyAccessTokenError:

@@ -5,7 +5,7 @@ from mcp.server.fastmcp import Context
 from .auth0.authz import require_scopes
 
 
-def register_tools(auth0Mcp):
+def register_tools(auth0Mcp) -> None:
     """
     Register all tools with the MCP server.
     """
@@ -28,7 +28,7 @@ def register_tools(auth0Mcp):
     )
     @require_scopes(["tool:greet"])
     async def greet(name: str, ctx: Context) -> str:
-        name = (name or "").strip() or "world"
+        name = name.strip() if name else "world"
         auth_info = ctx.request_context.request.state.auth
         user_id = auth_info.get("extra", {}).get("sub")
         return f"Hello, {name}! You are authenticated as {user_id}"

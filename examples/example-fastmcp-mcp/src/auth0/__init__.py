@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Callable, Union
+from collections.abc import Callable
 
 from mcp.server.auth.routes import create_protected_resource_routes
 from mcp.server.fastmcp import FastMCP
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route, Router
 
 from .errors import AuthenticationRequired, InsufficientScope, MalformedAuthorizationRequest
@@ -68,7 +68,7 @@ class Auth0Mcp:
         if scopes:
             self._scopes_supported.update(scopes)
 
-    def exception_handlers(self) -> dict[Union[int, type[Exception]], Callable]:
+    def exception_handlers(self) -> dict[int | type[Exception], Callable[[Request, Exception], Response]]:
         return {
             AuthenticationRequired: self._auth_error_handler,
             InsufficientScope: self._auth_error_handler,
