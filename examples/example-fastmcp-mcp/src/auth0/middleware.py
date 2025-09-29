@@ -33,17 +33,17 @@ class Auth0Middleware(BaseHTTPMiddleware):
         client_id = token.get('client_id') or token.get('azp')
         if not client_id:
             raise VerifyAccessTokenError("Token missing 'client_id' or 'azp' claim")
-        
+
         scopes = token.get("scope", "").split() if token.get("scope") else []
-        
+
         auth_data = {
             "client_id": client_id,
             "scopes": scopes,
         }
-        
+
         if expires_at := token.get('exp'):
             auth_data["expires_at"] = expires_at
-        
+
         # Extract extra claims with dict comprehension
         extra_fields = {'sub', 'azp', 'name', 'email', 'client_id'}
         auth_data["extra"] = {
@@ -51,7 +51,7 @@ class Auth0Middleware(BaseHTTPMiddleware):
             for field in extra_fields
             if field in token
         }
-        
+
         return auth_data
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
