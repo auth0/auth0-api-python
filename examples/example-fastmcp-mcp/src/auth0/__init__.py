@@ -91,7 +91,7 @@ class Auth0Mcp:
             Exception: self._generic_exception_handler,
         }
 
-    def _auth_error_handler(self, request: Request, exc: Exception)  -> JSONResponse:
+    def _auth_error_handler(self, request: Request, exc: Exception) -> JSONResponse:
         """
         Handle auth errors: malformed authorization requests, missing auth, invalid tokens, and insufficient scopes.
         """
@@ -107,7 +107,7 @@ class Auth0Mcp:
             headers={"WWW-Authenticate": self._build_www_authenticate_header(exc.error_code, exc.description, include_resource_metadata)},
         )
 
-    def _generic_exception_handler(self, request:Request, exc: Exception):
+    def _generic_exception_handler(self, request: Request, exc: Exception) -> JSONResponse:
         """
         Fallback handler for all other exceptions.
         """
