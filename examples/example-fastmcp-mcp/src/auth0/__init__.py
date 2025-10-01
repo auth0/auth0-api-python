@@ -8,7 +8,6 @@ including token verification, middleware, and scoped tool decorators.
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Callable
 
 from mcp.server.auth.routes import create_protected_resource_routes
@@ -25,10 +24,11 @@ logger = logging.getLogger(__name__)
 
 
 class Auth0Mcp:
-    def __init__(self, name: str, audience: str, domain: str):
+    def __init__(self, name: str, audience: str, domain: str, mcp_server_url: str | None = None):
         self.name = name
         self.audience = audience
         self.domain = domain
+        self.mcp_server_url = mcp_server_url
         if not self.audience or not self.domain:
             raise RuntimeError("audience and domain must be provided")
         self.mcp = FastMCP(
@@ -113,9 +113,8 @@ class Auth0Mcp:
         Build WWW-Authenticate header according to RFC 9728 Section 5.1.
         """
         www_auth_params = [f'error="{error_code}"', f'error_description="{description}"']
-        metadata_url = os.getenv('MCP_SERVER_URL')
-        if include_resource_metadata and metadata_url:
-            metadata_url = metadata_url.rstrip("/") + "/.well-known/oauth-protected-resource"
+        if include_resource_metadata and self.mcp_server_url:
+            metadata_url = self.mcp_server_url.rstrip("/") + "/.well-known/oauth-protected-resource"
             www_auth_params.append(f'resource_metadata="{metadata_url}"')
 
         return f"Bearer {', '.join(www_auth_params)}"
