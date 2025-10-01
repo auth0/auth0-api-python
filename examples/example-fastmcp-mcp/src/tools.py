@@ -3,7 +3,7 @@ import json
 from mcp.server.fastmcp import Context
 
 from .auth0 import Auth0Mcp
-from .auth0.authz import require_scopes
+from .auth0.authz import register_required_scopes, require_scopes
 
 
 def register_tools(auth0_mcp: Auth0Mcp) -> None:
@@ -11,8 +11,6 @@ def register_tools(auth0_mcp: Auth0Mcp) -> None:
     Register all tools with the MCP server.
     """
     mcp = auth0_mcp.mcp
-    # Register scopes used by tools for Protected Resource Metadata
-    auth0_mcp.register_scopes(["tool:greet", "tool:whoami"])
 
     # Tool without required scopes
     @mcp.tool()
@@ -50,3 +48,6 @@ def register_tools(auth0_mcp: Auth0Mcp) -> None:
             "scopes": auth_info.get("scopes", []),
         }
         return json.dumps(response_data, indent=2)
+
+    # Register all scopes used by tools for Protected Resource Metadata
+    register_required_scopes(auth0_mcp)

@@ -5,8 +5,11 @@ from functools import wraps
 
 from mcp.server.fastmcp import Context
 
+from . import Auth0Mcp
 from .errors import AuthenticationRequired, InsufficientScope
 
+# Collect required scopes from all decorated functions
+_scopes_required: set[str] = set()
 
 def require_scopes(required_scopes: Iterable[str]):
     """
@@ -19,6 +22,10 @@ def require_scopes(required_scopes: Iterable[str]):
         return f"Hello {name}!"
     """
     required_scopes_list = list(required_scopes)
+
+    # Collect scopes when decorator is applied
+    _scopes_required.update(required_scopes_list)
+
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
@@ -39,3 +46,9 @@ def require_scopes(required_scopes: Iterable[str]):
             return await func(*args, **kwargs)
         return wrapper
     return decorator
+
+def register_required_scopes(auth0_mcp: Auth0Mcp) -> None:
+    """Register all scopes that were collected from @require_scopes decorators."""
+    if _scopes_required:
+        auth0_mcp.register_scopes(list(_scopes_required))
+        _scopes_required.clear()
