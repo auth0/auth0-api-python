@@ -24,6 +24,20 @@ logger = logging.getLogger(__name__)
 
 
 class Auth0Mcp:
+    """
+    Auth0 integration for FastMCP servers.
+
+    Provides authentication middleware, authorization decorators,
+    and OAuth2 Protected Resource metadata endpoints for MCP servers.
+
+    Args:
+        name: Human-readable name for the MCP server
+        audience: Auth0 API identifier (OAuth2 audience claim)
+        domain: Auth0 tenant domain (e.g., 'tenant.us.auth0.com')
+
+    Raises:
+        RuntimeError: If audience or domain are not provided
+    """
     def __init__(self, name: str, audience: str, domain: str, mcp_server_url: str | None = None):
         self.name = name
         self.audience = audience
@@ -77,7 +91,7 @@ class Auth0Mcp:
             Exception: self._generic_exception_handler,
         }
 
-    def _auth_error_handler(self, request: Request, exc: Exception):
+    def _auth_error_handler(self, request: Request, exc: Exception)  -> JSONResponse:
         """
         Handle auth errors: malformed authorization requests, missing auth, invalid tokens, and insufficient scopes.
         """
