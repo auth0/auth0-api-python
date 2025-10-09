@@ -17,9 +17,17 @@ class Config:
 
     @classmethod
     def from_env(cls) -> Config:
+        auth0_domain = os.getenv("AUTH0_DOMAIN")
+        if not auth0_domain:
+            raise ValueError("AUTH0_DOMAIN environment variable is required")
+
+        auth0_audience = os.getenv("AUTH0_AUDIENCE")
+        if not auth0_audience:
+            raise ValueError("AUTH0_AUDIENCE environment variable is required")
+
         return cls(
-            auth0_domain=os.environ["AUTH0_DOMAIN"],
-            auth0_audience=os.environ["AUTH0_AUDIENCE"],
+            auth0_domain=auth0_domain,
+            auth0_audience=auth0_audience,
             mcp_server_url=os.getenv("MCP_SERVER_URL", "http://localhost:3001"),
             port=int(os.getenv("PORT", "3001")),
             debug=os.getenv("DEBUG", "false").lower() == "true",
