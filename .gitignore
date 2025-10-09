@@ -18,7 +18,6 @@ dist
 docs
 
 #testfile
-server.py
 setup.py
 test.py
 test-script.py
