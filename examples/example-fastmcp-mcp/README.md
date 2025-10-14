@@ -159,3 +159,20 @@ npx @modelcontextprotocol/inspector
 The server will start up and the UI will be accessible at http://localhost:6274.
 
 In the MCP Inspector, select `Streamable HTTP` as the `Transport Type` and enter `http://localhost:3001/mcp` as the URL.
+
+### Using cURL
+
+You can use cURL to verify that the server is running:
+
+```bash
+# Test that the server is running and accessible - check OAuth resource metadata
+curl -v http://localhost:3001/.well-known/oauth-protected-resource
+
+# Test MCP initialization (requires valid Auth0 access token)
+curl -X POST http://localhost:3001/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "curl-test", "version": "1.0.0"}}}'
+```
+
+**Note:** Use the MCP Inspector or other MCP-compatible clients for comprehensive testing.
