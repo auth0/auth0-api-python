@@ -1,12 +1,12 @@
 # Core runtime dependencies
-authlib>=1.6.3
+authlib>=1.6.5
 httpx>=0.28.1
-ada-url>=1.26.0
+ada-url>=1.27.0
 
 # Development and testing dependencies
 pytest>=8.0
 pytest-cov>=4.0
-pytest-asyncio>=0.20.3
-pytest-mock>=3.14.1
+pytest-asyncio>=0.25.3
+pytest-mock>=3.15.1
 pytest-httpx>=0.35.0
 
