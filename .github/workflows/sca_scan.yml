@@ -9,4 +9,8 @@ jobs:
     uses: auth0/devsecops-tooling/.github/workflows/sca-scan.yml@main
     with:
       additional-arguments: "--exclude=README.md,.jfrog"
+      python-version: "3.11"
+      pre-scan-commands: |
+        python3 -m venv venv --upgrade-deps
+        ./venv/bin/pip3 install -r https://github.com/auth0/auth0-api-python/blob/main/requirements.txt
     secrets: inherit
