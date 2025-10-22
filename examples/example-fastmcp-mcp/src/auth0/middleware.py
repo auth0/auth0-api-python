@@ -2,12 +2,13 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from auth0_api_python import ApiClient, ApiClientOptions
-from auth0_api_python.errors import VerifyAccessTokenError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp
+
+from auth0_api_python import ApiClient, ApiClientOptions
+from auth0_api_python.errors import VerifyAccessTokenError
 
 from .errors import AuthenticationRequired, MalformedAuthorizationRequest
 

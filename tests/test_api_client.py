@@ -5,6 +5,8 @@ import urllib
 
 import httpx
 import pytest
+from pytest_httpx import HTTPXMock
+
 from auth0_api_python.api_client import ApiClient
 from auth0_api_python.config import ApiClientOptions
 from auth0_api_python.errors import (
@@ -24,7 +26,6 @@ from auth0_api_python.token_utils import (
     generate_token_with_cnf,
     sha256_base64url,
 )
-from pytest_httpx import HTTPXMock
 
 # Create public RSA JWK by selecting only public key components
 PUBLIC_RSA_JWK = {k: PRIVATE_JWK[k] for k in ["kty", "n", "e", "alg", "use", "kid"] if k in PRIVATE_JWK}
