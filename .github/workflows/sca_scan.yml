@@ -16,5 +16,5 @@ jobs:
         ls -la
         echo "---"
         python3 -m venv venv --upgrade-deps
-        ./venv/bin/pip3 install -r https://github.com/auth0/auth0-api-python/blob/main/requirements.txt
+        ./venv/bin/pip3 install -r requirements.txt
     secrets: inherit
