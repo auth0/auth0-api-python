@@ -11,6 +11,10 @@ jobs:
       additional-arguments: "--exclude=README.md,.jfrog"
       python-version: "3.10"
       pre-scan-commands: |
+        echo "Current directory: $(pwd)"
+        echo "List of files in current directory:"
+        ls -la
+        echo "---"
         python3 -m venv venv --upgrade-deps
         ./venv/bin/pip3 install -r https://github.com/auth0/auth0-api-python/blob/main/requirements.txt
     secrets: inherit
