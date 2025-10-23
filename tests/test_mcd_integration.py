@@ -161,22 +161,12 @@ async def validate_token(client: ApiClient, token: str, issuer: str, mode: str):
         return False
     
     try:
-        # Pass request context to dynamic resolver
-        request_context = None
-        if mode == "dynamic":
-            # Simulate request context (in real app, this comes from HTTP request)
-            request_context = {
-                "domain": "api.example.com",
-                "headers": {
-                    "user-agent": "MCD-SDK-Test/1.0",
-                    "x-forwarded-for": "192.168.1.1"
-                },
-                "url": f"https://api.example.com/protected"
-            }
+        headers = {"authorization": f"Bearer {token}"}
         
-        claims = await client.verify_access_token(
-            access_token=token,
-            request_context=request_context
+        claims = await client.verify_request(
+            headers=headers,
+            http_method="GET",
+            http_url="https://api.example.com/protected"
         )
         print(f"  Status: VALID")
         print(f"  Issuer: {claims.get('iss')}")

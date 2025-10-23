@@ -164,8 +164,17 @@ class ApiClient:
                     auth_scheme=scheme
                 )
 
+            # Build request context for MCD dynamic resolver
+            request_context = {
+                "headers": headers,
+                "url": http_url
+            } if http_url else {"headers": headers}
+            
             try:
-                access_token_claims = await self.verify_access_token(token)
+                access_token_claims = await self.verify_access_token(
+                    token,
+                    request_context=request_context
+                )
             except VerifyAccessTokenError as e:
                 raise self._prepare_error(e, auth_scheme=scheme)
 
@@ -212,8 +221,17 @@ class ApiClient:
             return access_token_claims
 
         if scheme == "bearer":
+            # Build request context for MCD dynamic resolver
+            request_context = {
+                "headers": headers,
+                "url": http_url
+            } if http_url else {"headers": headers}
+            
             try:
-                claims = await self.verify_access_token(token)
+                claims = await self.verify_access_token(
+                    token,
+                    request_context=request_context
+                )
                 if claims.get("cnf") and isinstance(claims["cnf"], dict) and claims["cnf"].get("jkt"):
                     if self.options.dpop_enabled:
                         raise self._prepare_error(
@@ -573,7 +591,7 @@ class ApiClient:
         return self._metadata
 
     async def _load_jwks(self) -> dict[str, Any]:
-        """Fetches and caches JWKS data from the OIDC metadata."""
+        """Fetch and cache JWKS from OIDC metadata."""
         if self._jwks_data is None:
             metadata = await self._discover()
             jwks_uri = metadata["jwks_uri"]
@@ -583,80 +601,12 @@ class ApiClient:
             )
         return self._jwks_data
 
-    async def _load_jwks_for_issuer(self, issuer: str) -> dict[str, Any]:
-        """
-        Fetch JWKS from a specific issuer's .well-known endpoint.
-        Implements per-issuer caching with TTL.
-        
-        Args:
-            issuer: The issuer URL (e.g., "https://tenant.auth0.com")
-            
-        Returns:
-            JWKS data dictionary
-            
-        Raises:
-            JWKSFetchError: If JWKS fetch fails
-        """
+    async def _fetch_jwks_from_url(self, jwks_url: str, issuer: Optional[str] = None) -> dict[str, Any]:
+        """Fetch and cache JWKS from URL."""
         # Check cache
-        if issuer in self._jwks_cache:
-            cached_data, timestamp = self._jwks_cache[issuer]
-            # Cache for 10 minutes
-            if time.time() - timestamp < 600:
-                return cached_data
-        
-        # Construct JWKS URI from issuer
-        jwks_uri = f"{issuer}/.well-known/jwks.json"
-        
-        try:
-            if self.options.custom_fetch:
-                response = await self.options.custom_fetch(jwks_uri)
-                jwks_data = response.json() if hasattr(response, "json") else response
-            else:
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(jwks_uri, timeout=10.0)
-                    response.raise_for_status()
-                    jwks_data = response.json()
-            
-            # Cache the result
-            self._jwks_cache[issuer] = (jwks_data, time.time())
-            
-            return jwks_data
-            
-        except httpx.HTTPError as e:
-            raise JWKSFetchError(
-                f"Failed to fetch JWKS: {str(e)}",
-                issuer=issuer,
-                jwks_uri=jwks_uri
-            ) from e
-        except Exception as e:
-            raise JWKSFetchError(
-                f"Unexpected error fetching JWKS: {str(e)}",
-                issuer=issuer,
-                jwks_uri=jwks_uri
-            ) from e
-
-    async def _load_jwks_from_url(self, jwks_url: str) -> dict[str, Any]:
-        """
-        Fetch JWKS from a custom URL (used when dynamic resolver provides JWKS URL).
-        Implements caching with TTL.
-        
-        Args:
-            jwks_url: The full JWKS URL
-            
-        Returns:
-            JWKS data dictionary
-            
-        Raises:
-            JWKSFetchError: If JWKS fetch fails
-        """
-        # Use URL as cache key
-        cache_key = jwks_url
-        
-        # Check cache
-        if cache_key in self._jwks_cache:
-            cached_data, timestamp = self._jwks_cache[cache_key]
-            # Cache for 10 minutes
-            if time.time() - timestamp < 600:
+        if jwks_url in self._jwks_cache:
+            cached_data, timestamp = self._jwks_cache[jwks_url]
+            if time.time() - timestamp < 600:  # 10 minutes
                 return cached_data
         
         try:
@@ -665,43 +615,41 @@ class ApiClient:
                 jwks_data = response.json() if hasattr(response, "json") else response
             else:
                 async with httpx.AsyncClient() as client:
-                    response = await client.get(jwks_url, timeout=10.0)
+                    response = await client.get(jwks_url)
                     response.raise_for_status()
                     jwks_data = response.json()
             
-            # Cache the result
-            self._jwks_cache[cache_key] = (jwks_data, time.time())
-            
+            self._jwks_cache[jwks_url] = (jwks_data, time.time())
             return jwks_data
             
         except httpx.HTTPError as e:
             raise JWKSFetchError(
-                f"Failed to fetch JWKS from custom URL: {str(e)}",
-                issuer=cache_key,
+                f"Failed to fetch JWKS: {str(e)}",
+                issuer=issuer or jwks_url,
                 jwks_uri=jwks_url
             ) from e
         except Exception as e:
             raise JWKSFetchError(
-                f"Unexpected error fetching JWKS from custom URL: {str(e)}",
-                issuer=cache_key,
+                f"Unexpected error fetching JWKS: {str(e)}",
+                issuer=issuer or jwks_url,
                 jwks_uri=jwks_url
             ) from e
+
+    async def _load_jwks_for_issuer(self, issuer: str) -> dict[str, Any]:
+        """Fetch JWKS from issuer's .well-known endpoint."""
+        jwks_url = f"{issuer}/.well-known/jwks.json"
+        return await self._fetch_jwks_from_url(jwks_url, issuer)
+
+    async def _load_jwks_from_url(self, jwks_url: str) -> dict[str, Any]:
+        """Fetch JWKS from custom URL (for dynamic resolver)."""
+        return await self._fetch_jwks_from_url(jwks_url)
 
     def _validate_claims_presence(
         self,
         claims: dict[str, Any],
         required_claims: list[str]
     ) -> None:
-        """
-        Validates that all required claims are present in the claims dict.
-
-        Args:
-            claims: The claims dictionary to validate
-            required_claims: List of claim names that must be present
-
-        Raises:
-            InvalidDpopProofError: If any required claim is missing
-        """
+        """Validate that all required claims are present."""
         missing_claims = []
 
         for claim in required_claims:

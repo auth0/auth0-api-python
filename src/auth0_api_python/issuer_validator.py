@@ -104,15 +104,7 @@ class IssuerValidator:
         self._cache: Dict[str, Tuple[bool, Optional[str], float]] = {}
     
     def _normalize_issuer(self, issuer: str) -> str:
-        """
-        Normalize an issuer to a full HTTPS URL.
-        
-        Args:
-            issuer: Domain or full URL
-            
-        Returns:
-            Normalized issuer URL (e.g., "https://tenant.auth0.com")
-        """
+        """Normalize issuer to full HTTPS URL without trailing slash."""
         issuer = issuer.strip()
         
         # If it's just a domain, add https://
@@ -157,21 +149,15 @@ class IssuerValidator:
         return (result, jwks_url)
     
     def _validate_single(self, context: IssuerValidationContext) -> bool:
-        """Validate against single issuer (backward compatible mode)."""
+        """Validate against single issuer."""
         return context.token_issuer == self._single_issuer
     
     def _validate_static(self, context: IssuerValidationContext) -> bool:
-        """Validate against static array of issuers."""
+        """Validate against static issuer list."""
         return context.token_issuer in self._static_issuers
     
     async def _validate_dynamic(self, context: IssuerValidationContext) -> Tuple[bool, Optional[str]]:
-        """
-        Validate using dynamic resolver function.
-        
-        Returns:
-            Tuple of (is_valid, jwks_url)
-            - Resolver returns JWKS URL (string) if valid, None if invalid
-        """
+        """Validate using dynamic resolver. Returns (is_valid, jwks_url)."""
         try:
             result = self.issuer_resolver(context)
             
@@ -189,15 +175,7 @@ class IssuerValidator:
             return (False, None)
     
     def _get_from_cache(self, issuer: str) -> Optional[Tuple[bool, Optional[str]]]:
-        """
-        Get validation result from cache if not expired.
-        
-        Args:
-            issuer: The issuer URL to look up
-            
-        Returns:
-            Cached validation result (is_valid, jwks_url) or None if not cached or expired
-        """
+        """Get cached validation result if not expired."""
         if issuer not in self._cache:
             return None
         
@@ -212,16 +190,9 @@ class IssuerValidator:
         return (is_valid, jwks_url)
     
     def _add_to_cache(self, issuer: str, is_valid: bool, jwks_url: Optional[str] = None) -> None:
-        """
-        Add validation result to cache.
-        
-        Args:
-            issuer: The issuer URL
-            is_valid: Whether the issuer is valid
-            jwks_url: The JWKS URL (for dynamic resolver mode)
-        """
+        """Add validation result to cache."""
         self._cache[issuer] = (is_valid, jwks_url, time.time())
     
     def clear_cache(self) -> None:
-        """Clear the validation cache. Useful for testing or forced refresh."""
+        """Clear the validation cache."""
         self._cache.clear()
