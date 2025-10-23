@@ -74,6 +74,35 @@ def get_unverified_header(token: Union[str, bytes]) -> dict:
     return json.loads(header_data)
 
 
+def decode_jwt_unverified(token: Union[str, bytes]) -> dict:
+    """
+    Decode JWT payload without verifying signature.
+    Used to extract claims like 'iss' before validation.
+    
+    Args:
+        token: JWT token string or bytes
+        
+    Returns:
+        Decoded payload claims
+        
+    Raises:
+        ValueError: If token format is invalid
+    """
+    if isinstance(token, bytes):
+        token = token.decode("utf-8")
+
+    parts = token.split(".")
+    if len(parts) != 3:
+        raise ValueError(f"Invalid token format: expected 3 segments, got {len(parts)}")
+
+    payload_b64 = parts[1]
+    payload_b64 = remove_bytes_prefix(payload_b64)
+    payload_b64 = fix_base64_padding(payload_b64)
+
+    payload_data = base64.urlsafe_b64decode(payload_b64)
+    return json.loads(payload_data)
+
+
 
 def fix_base64_padding(segment: str) -> str:
     """

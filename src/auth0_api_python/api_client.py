@@ -11,12 +11,16 @@ from .errors import (
     GetAccessTokenForConnectionError,
     InvalidAuthSchemeError,
     InvalidDpopProofError,
+    IssuerValidationError,
+    JWKSFetchError,
     MissingAuthorizationError,
     MissingRequiredArgumentError,
     VerifyAccessTokenError,
 )
+from .issuer_validator import IssuerValidationContext, IssuerValidator
 from .utils import (
     calculate_jwk_thumbprint,
+    decode_jwt_unverified,
     fetch_jwks,
     fetch_oidc_metadata,
     get_unverified_header,
@@ -32,14 +36,23 @@ class ApiClient:
     """
 
     def __init__(self, options: ApiClientOptions):
-        if not options.domain:
-            raise MissingRequiredArgumentError("domain")
         if not options.audience:
             raise MissingRequiredArgumentError("audience")
 
         self.options = options
+        
+        # Initialize issuer validator (handles domain, issuers, or issuer_resolver)
+        self.issuer_validator = IssuerValidator(
+            domain=options.domain,
+            issuers=options.issuers,
+            issuer_resolver=options.issuer_resolver,
+            cache_ttl=options.issuer_cache_ttl
+        )
+        
         self._metadata: Optional[dict[str, Any]] = None
         self._jwks_data: Optional[dict[str, Any]] = None
+        # Per-issuer JWKS cache: {issuer: (jwks_data, timestamp)}
+        self._jwks_cache: dict[str, tuple[dict[str, Any], float]] = {}
 
         self._jwt = JsonWebToken(["RS256"])
 
@@ -226,21 +239,31 @@ class ApiClient:
     async def verify_access_token(
         self,
         access_token: str,
-        required_claims: Optional[list[str]] = None
+        required_claims: Optional[list[str]] = None,
+        request_context: Optional[dict[str, Any]] = None
     ) -> dict[str, Any]:
         """
-        Asynchronously verifies the provided JWT access token.
+        Asynchronously verifies the provided JWT access token with MCD support.
 
-        - Fetches OIDC metadata and JWKS if not already cached.
-        - Decodes and validates signature (RS256) with the correct key.
+        - Decodes JWT to extract issuer claim (unverified)
+        - Validates issuer against configured method (single/static/dynamic)
+        - Fetches JWKS from validated issuer
+        - Verifies signature (RS256) with the correct key
         - Checks standard claims: 'iss', 'aud', 'exp', 'iat'
-        - Checks extra required claims if 'required_claims' is provided.
+        - Checks extra required claims if 'required_claims' is provided
+
+        Args:
+            access_token: JWT access token to verify
+            required_claims: Optional list of additional required claims
+            request_context: Optional context for dynamic issuer validation
+                           (e.g., {"domain": "api.example.com", "headers": {...}})
 
         Returns:
             The decoded token claims if valid.
 
         Raises:
             MissingRequiredArgumentError: If no token is provided.
+            IssuerValidationError: If issuer validation fails.
             VerifyAccessTokenError: If verification fails (signature, claims mismatch, etc.).
         """
         if not access_token:
@@ -248,13 +271,48 @@ class ApiClient:
 
         required_claims = required_claims or []
 
+        # Step 1: Decode JWT without verification to extract issuer
+        try:
+            unverified_claims = decode_jwt_unverified(access_token)
+            token_issuer_raw = unverified_claims.get("iss")
+            
+            if not token_issuer_raw:
+                raise VerifyAccessTokenError("Token missing 'iss' claim")
+            
+            # Normalize issuer (remove trailing slash for comparison)
+            token_issuer = token_issuer_raw.rstrip("/")
+        except ValueError as e:
+            raise VerifyAccessTokenError(f"Failed to decode token: {str(e)}") from e
+
+        # Step 2: Validate issuer before fetching JWKS (security requirement)
+        validation_context = IssuerValidationContext(
+            token_issuer=token_issuer,
+            request_domain=request_context.get("domain") if request_context else None,
+            request_headers=request_context.get("headers") if request_context else None,
+            request_url=request_context.get("url") if request_context else None
+        )
+        
+        is_valid, jwks_url = await self.issuer_validator.validate(validation_context)
+        if not is_valid:
+            raise IssuerValidationError(
+                f"Issuer '{token_issuer}' is not allowed",
+                issuer=token_issuer
+            )
+
+        # Step 3: Fetch JWKS from validated issuer
+        # If resolver provided custom JWKS URL, use it; otherwise use default
+        if jwks_url:
+            jwks_data = await self._load_jwks_from_url(jwks_url)
+        else:
+            jwks_data = await self._load_jwks_for_issuer(token_issuer)
+
+        # Step 4: Extract kid and find matching key
         try:
             header = get_unverified_header(access_token)
             kid = header["kid"]
         except Exception as e:
             raise VerifyAccessTokenError(f"Failed to parse token header: {str(e)}") from e
 
-        jwks_data = await self._load_jwks()
         matching_key_dict = None
         for key_dict in jwks_data["keys"]:
             if key_dict.get("kid") == kid:
@@ -262,8 +320,11 @@ class ApiClient:
                 break
 
         if not matching_key_dict:
-            raise VerifyAccessTokenError(f"No matching key found for kid: {kid}")
+            raise VerifyAccessTokenError(
+                f"No matching key found for kid: {kid} from issuer: {token_issuer}"
+            )
 
+        # Step 5: Verify signature
         public_key = JsonWebKey.import_key(matching_key_dict)
 
         if isinstance(access_token, str) and access_token.startswith("b'"):
@@ -273,11 +334,10 @@ class ApiClient:
         except Exception as e:
             raise VerifyAccessTokenError(f"Signature verification failed: {str(e)}") from e
 
-        metadata = await self._discover()
-        issuer = metadata["issuer"]
-
-        if claims.get("iss") != issuer:
-            raise VerifyAccessTokenError("Issuer mismatch")
+        # Step 6: Validate claims
+        # Compare with original issuer (with trailing slash if present)
+        if claims.get("iss") != token_issuer_raw:
+            raise VerifyAccessTokenError("Issuer mismatch after verification")
 
         expected_aud = self.options.audience
         actual_aud = claims.get("aud")
@@ -522,6 +582,110 @@ class ApiClient:
                 custom_fetch=self.options.custom_fetch
             )
         return self._jwks_data
+
+    async def _load_jwks_for_issuer(self, issuer: str) -> dict[str, Any]:
+        """
+        Fetch JWKS from a specific issuer's .well-known endpoint.
+        Implements per-issuer caching with TTL.
+        
+        Args:
+            issuer: The issuer URL (e.g., "https://tenant.auth0.com")
+            
+        Returns:
+            JWKS data dictionary
+            
+        Raises:
+            JWKSFetchError: If JWKS fetch fails
+        """
+        # Check cache
+        if issuer in self._jwks_cache:
+            cached_data, timestamp = self._jwks_cache[issuer]
+            # Cache for 10 minutes
+            if time.time() - timestamp < 600:
+                return cached_data
+        
+        # Construct JWKS URI from issuer
+        jwks_uri = f"{issuer}/.well-known/jwks.json"
+        
+        try:
+            if self.options.custom_fetch:
+                response = await self.options.custom_fetch(jwks_uri)
+                jwks_data = response.json() if hasattr(response, "json") else response
+            else:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(jwks_uri, timeout=10.0)
+                    response.raise_for_status()
+                    jwks_data = response.json()
+            
+            # Cache the result
+            self._jwks_cache[issuer] = (jwks_data, time.time())
+            
+            return jwks_data
+            
+        except httpx.HTTPError as e:
+            raise JWKSFetchError(
+                f"Failed to fetch JWKS: {str(e)}",
+                issuer=issuer,
+                jwks_uri=jwks_uri
+            ) from e
+        except Exception as e:
+            raise JWKSFetchError(
+                f"Unexpected error fetching JWKS: {str(e)}",
+                issuer=issuer,
+                jwks_uri=jwks_uri
+            ) from e
+
+    async def _load_jwks_from_url(self, jwks_url: str) -> dict[str, Any]:
+        """
+        Fetch JWKS from a custom URL (used when dynamic resolver provides JWKS URL).
+        Implements caching with TTL.
+        
+        Args:
+            jwks_url: The full JWKS URL
+            
+        Returns:
+            JWKS data dictionary
+            
+        Raises:
+            JWKSFetchError: If JWKS fetch fails
+        """
+        # Use URL as cache key
+        cache_key = jwks_url
+        
+        # Check cache
+        if cache_key in self._jwks_cache:
+            cached_data, timestamp = self._jwks_cache[cache_key]
+            # Cache for 10 minutes
+            if time.time() - timestamp < 600:
+                return cached_data
+        
+        try:
+            if self.options.custom_fetch:
+                response = await self.options.custom_fetch(jwks_url)
+                jwks_data = response.json() if hasattr(response, "json") else response
+            else:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(jwks_url, timeout=10.0)
+                    response.raise_for_status()
+                    jwks_data = response.json()
+            
+            # Cache the result
+            self._jwks_cache[cache_key] = (jwks_data, time.time())
+            
+            return jwks_data
+            
+        except httpx.HTTPError as e:
+            raise JWKSFetchError(
+                f"Failed to fetch JWKS from custom URL: {str(e)}",
+                issuer=cache_key,
+                jwks_uri=jwks_url
+            ) from e
+        except Exception as e:
+            raise JWKSFetchError(
+                f"Unexpected error fetching JWKS from custom URL: {str(e)}",
+                issuer=cache_key,
+                jwks_uri=jwks_url
+            ) from e
 
     def _validate_claims_presence(
         self,

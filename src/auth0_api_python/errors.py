@@ -2,6 +2,8 @@
 Custom exceptions for auth0-api-python SDK with HTTP response metadata
 """
 
+from typing import Optional
+
 
 class BaseAuthError(Exception):
     """Base class for all auth errors with HTTP response metadata."""
@@ -130,3 +132,45 @@ class ApiError(BaseAuthError):
 
     def get_error_code(self) -> str:
         return self.code
+
+
+class IssuerValidationError(BaseAuthError):
+    """Error raised when issuer validation fails."""
+
+    def __init__(self, message: str, issuer: Optional[str] = None):
+        super().__init__(message)
+        self.issuer = issuer
+
+    def get_status_code(self) -> int:
+        return 401
+
+    def get_error_code(self) -> str:
+        return "invalid_issuer"
+
+    def __str__(self) -> str:
+        if self.issuer:
+            return f"{self.message} (issuer: {self.issuer})"
+        return self.message
+
+
+class JWKSFetchError(BaseAuthError):
+    """Error raised when JWKS fetching fails."""
+
+    def __init__(self, message: str, issuer: Optional[str] = None, jwks_uri: Optional[str] = None):
+        super().__init__(message)
+        self.issuer = issuer
+        self.jwks_uri = jwks_uri
+
+    def get_status_code(self) -> int:
+        return 500
+
+    def get_error_code(self) -> str:
+        return "jwks_fetch_failed"
+
+    def __str__(self) -> str:
+        parts = [self.message]
+        if self.issuer:
+            parts.append(f"issuer: {self.issuer}")
+        if self.jwks_uri:
+            parts.append(f"JWKS URI: {self.jwks_uri}")
+        return " | ".join(parts)

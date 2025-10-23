@@ -23,3 +23,6 @@ test.py
 test-script.py
 .coverage
 coverage.xml
+
+# Local test files with credentials
+tests/test_mcd_integration_local.py
