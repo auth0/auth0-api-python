@@ -106,6 +106,16 @@ class GetAccessTokenForConnectionError(BaseAuthError):
         return "get_access_token_for_connection_error"
 
 
+class GetTokenByExchangeProfileError(BaseAuthError):
+    """Error raised when getting a token via exchange profile fails."""
+
+    def get_status_code(self) -> int:
+        return 400
+
+    def get_error_code(self) -> str:
+        return "get_token_by_exchange_profile_error"
+
+
 class ApiError(BaseAuthError):
     """
     Error raised when an API request to Auth0 fails.

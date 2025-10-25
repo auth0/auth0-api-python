@@ -5,6 +5,7 @@ import urllib
 
 import httpx
 import pytest
+from freezegun import freeze_time
 from pytest_httpx import HTTPXMock
 
 from auth0_api_python.api_client import ApiClient
@@ -12,6 +13,7 @@ from auth0_api_python.config import ApiClientOptions
 from auth0_api_python.errors import (
     ApiError,
     GetAccessTokenForConnectionError,
+    GetTokenByExchangeProfileError,
     InvalidAuthSchemeError,
     InvalidDpopProofError,
     MissingAuthorizationError,
@@ -29,6 +31,39 @@ from auth0_api_python.token_utils import (
 
 # Create public RSA JWK by selecting only public key components
 PUBLIC_RSA_JWK = {k: PRIVATE_JWK[k] for k in ["kty", "n", "e", "alg", "use", "kid"] if k in PRIVATE_JWK}
+
+
+# ===== Fixtures and Helpers =====
+
+@pytest.fixture
+def api_client_confidential():
+    """Fixture for creating a confidential API client with credentials."""
+    return ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+    ))
+
+
+@pytest.fixture
+def mock_discovery(httpx_mock: HTTPXMock):
+    """Fixture for mocking OIDC discovery endpoint."""
+    httpx_mock.add_response(
+        method="GET",
+        url="https://auth0.local/.well-known/openid-configuration",
+        json={"token_endpoint": "https://auth0.local/oauth/token"},
+    )
+    return httpx_mock
+
+
+def last_form(httpx_mock: HTTPXMock) -> dict[str, list[str]]:
+    """Helper to read the last posted form data."""
+    req = httpx_mock.get_requests()[-1]
+    return urllib.parse.parse_qs(req.content.decode())
+
+
+# ===== Tests =====
 
 @pytest.mark.asyncio
 async def test_init_missing_args():
@@ -1537,10 +1572,11 @@ async def test_verify_request_with_multiple_spaces_in_authorization():
     api_client = ApiClient(
         ApiClientOptions(domain="auth0.local", audience="my-audience")
     )
-    with pytest.raises(InvalidAuthSchemeError) as err:
+    # split(None, 1) handles extra spaces between scheme and token gracefully,
+    # but malformed tokens with spaces inside fail during JWT parsing
+    with pytest.raises(VerifyAccessTokenError) as err:
         await api_client.verify_request({"authorization": "Bearer  token  with  extra  spaces"})
-    assert err.value.get_status_code() == 400
-    assert "invalid_request" in str(err.value.get_error_code()).lower()
+    assert "failed to parse token" in str(err.value).lower()
 
 @pytest.mark.asyncio
 async def test_verify_request_fail_missing_dpop_header():
@@ -1649,8 +1685,7 @@ async def test_get_access_token_for_connection_with_login_hint(httpx_mock: HTTPX
         "login_hint": "user@example.com"
     })
     assert result["access_token"] == "abc123"
-    request = httpx_mock.get_requests()[-1]
-    form_data = urllib.parse.parse_qs(request.content.decode())
+    form_data = last_form(httpx_mock)
     assert form_data["login_hint"] == ["user@example.com"]
 
 @pytest.mark.asyncio
@@ -1901,3 +1936,298 @@ async def test_get_access_token_for_connection_error_text_json_content_type(http
         assert err.value.code == "invalid_response"
         assert "expires_in" in str(err.value).lower()
         assert err.value.status_code == 502
+
+
+# ===== Custom Token Exchange Tests =====
+
+
+@pytest.mark.asyncio
+async def test_get_token_by_exchange_profile_success(httpx_mock: HTTPXMock):
+    """Test successful token exchange via profile."""
+    httpx_mock.add_response(
+        method="GET",
+        url="https://auth0.local/.well-known/openid-configuration",
+        json={"token_endpoint": "https://auth0.local/oauth/token"}
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url="https://auth0.local/oauth/token",
+        json={
+            "access_token": "exchanged_token",
+            "expires_in": 3600,
+            "scope": "openid profile",
+            "id_token": "id_token_value",
+            "refresh_token": "refresh_token_value",
+            "token_type": "Bearer",
+            "issued_token_type": "urn:ietf:params:oauth:token-type:access_token"
+        }
+    )
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret"
+    ))
+
+    result = await api_client.get_token_by_exchange_profile(
+        subject_token="custom-token-123",
+        subject_token_type="urn:example:custom-token",
+        audience="https://api.example.com",
+        scope="openid profile"
+    )
+
+    assert result["access_token"] == "exchanged_token"
+    assert result["expires_in"] == 3600
+    assert result["scope"] == "openid profile"
+    assert result["id_token"] == "id_token_value"
+    assert result["refresh_token"] == "refresh_token_value"
+    assert result["token_type"] == "Bearer"
+    assert result["issued_token_type"] == "urn:ietf:params:oauth:token-type:access_token"
+    assert isinstance(result["expires_at"], int)
+
+    # Verify request parameters
+    form_data = last_form(httpx_mock)
+    assert form_data["grant_type"] == ["urn:ietf:params:oauth:grant-type:token-exchange"]
+    assert form_data["subject_token"] == ["custom-token-123"]
+    assert form_data["subject_token_type"] == ["urn:example:custom-token"]
+    assert form_data["audience"] == ["https://api.example.com"]
+
+
+@freeze_time("2025-01-01T00:00:00Z")
+@pytest.mark.asyncio
+async def test_sets_expires_at(mock_discovery, api_client_confidential, httpx_mock):
+    """Test that expires_at is set deterministically."""
+    httpx_mock.add_response(
+        method="POST",
+        url="https://auth0.local/oauth/token",
+        json={"access_token": "t", "expires_in": 3600}
+    )
+    result = await api_client_confidential.get_token_by_exchange_profile(
+        subject_token="t",
+        subject_token_type="urn:x"
+    )
+    assert result["expires_at"] == 1735693200
+
+
+@pytest.mark.parametrize(
+    "kwargs,exc,msg",
+    [
+        ({"subject_token": "", "subject_token_type": "urn:x"}, MissingRequiredArgumentError, "subject_token"),
+        ({"subject_token": "t", "subject_token_type": ""}, MissingRequiredArgumentError, "subject_token_type"),
+        ({"subject_token": "   ", "subject_token_type": "urn:x"}, GetTokenByExchangeProfileError, "whitespace"),
+        ({"subject_token": " token ", "subject_token_type": "urn:x"}, GetTokenByExchangeProfileError, "leading or trailing whitespace"),
+        ({"subject_token": "Bearer abc", "subject_token_type": "urn:x"}, GetTokenByExchangeProfileError, "Bearer"),
+        ({"subject_token": "bearer abc", "subject_token_type": "urn:x"}, GetTokenByExchangeProfileError, "Bearer"),
+    ],
+    ids=["missing-token", "missing-type", "blank", "surrounding-whitespace", "bearer-prefix", "bearer-prefix-lowercase"],
+)
+@pytest.mark.asyncio
+async def test_exchange_profile_input_validation(api_client_confidential, kwargs, exc, msg):
+    """Test input validation for get_token_by_exchange_profile."""
+    with pytest.raises(exc) as err:
+        await api_client_confidential.get_token_by_exchange_profile(**kwargs)
+    assert msg.lower() in str(err.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_validation_short_circuits(api_client_confidential, httpx_mock):
+    """Test that validation errors prevent network requests."""
+    with pytest.raises(GetTokenByExchangeProfileError):
+        await api_client_confidential.get_token_by_exchange_profile(subject_token=" ", subject_token_type="urn:x")
+    # Verify no network requests were made (validation failed before discovery)
+    assert len(httpx_mock.get_requests()) == 0
+
+
+@pytest.mark.asyncio
+async def test_get_token_by_exchange_profile_missing_client_credentials():
+    """Test that missing client credentials raises error."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience"
+    ))
+
+    with pytest.raises(GetTokenByExchangeProfileError) as err:
+        await api_client.get_token_by_exchange_profile(
+            subject_token="token",
+            subject_token_type="urn:example:type"
+        )
+    assert "client credentials" in str(err.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_get_token_by_exchange_profile_with_extra_params(httpx_mock: HTTPXMock):
+    """Test token exchange with extra parameters."""
+    httpx_mock.add_response(
+        method="GET",
+        url="https://auth0.local/.well-known/openid-configuration",
+        json={"token_endpoint": "https://auth0.local/oauth/token"}
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url="https://auth0.local/oauth/token",
+        json={"access_token": "token", "expires_in": 3600}
+    )
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret"
+    ))
+
+    await api_client.get_token_by_exchange_profile(
+        subject_token="token",
+        subject_token_type="urn:example:type",
+        extra={
+            "device_id": "dev123",
+            "roles": ["admin", "user"]
+        }
+    )
+
+    form_data = last_form(httpx_mock)
+    assert form_data["device_id"] == ["dev123"]
+    assert form_data["roles"] == ["admin", "user"]
+
+
+@pytest.mark.parametrize(
+    "denied_param",
+    [
+        "grant_type", "client_id", "client_secret", "subject_token",
+        "subject_token_type", "audience", "scope", "connection"
+    ],
+    ids=["grant_type", "client_id", "client_secret", "subject_token",
+         "subject_token_type", "audience", "scope", "connection"]
+)
+@pytest.mark.asyncio
+async def test_get_token_by_exchange_profile_extra_params_denylist(httpx_mock: HTTPXMock, denied_param):
+    """Test that reserved extra parameters fail fast."""
+    httpx_mock.add_response(
+        method="GET",
+        url="https://auth0.local/.well-known/openid-configuration",
+        json={"token_endpoint": "https://auth0.local/oauth/token"}
+    )
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret"
+    ))
+
+    with pytest.raises(GetTokenByExchangeProfileError) as err:
+        await api_client.get_token_by_exchange_profile(
+            subject_token="token",
+            subject_token_type="urn:example:type",
+            extra={denied_param: "should_fail"}
+        )
+
+    assert "reserved" in str(err.value).lower()
+    assert denied_param in str(err.value)
+
+
+@pytest.mark.asyncio
+async def test_extra_array_limit(mock_discovery, api_client_confidential):
+    """Test that array size limit is enforced (DoS protection)."""
+    from auth0_api_python.api_client import MAX_ARRAY_VALUES_PER_KEY
+
+    # Create array exceeding limit
+    big = list(map(str, range(MAX_ARRAY_VALUES_PER_KEY + 1)))
+
+    with pytest.raises(GetTokenByExchangeProfileError) as err:
+        await api_client_confidential.get_token_by_exchange_profile(
+            subject_token="t",
+            subject_token_type="urn:x",
+            extra={"roles": big}
+        )
+    assert "maximum array size" in str(err.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_extra_reserved_case_insensitive(mock_discovery, api_client_confidential):
+    """Test that reserved parameter check is case-insensitive."""
+    with pytest.raises(GetTokenByExchangeProfileError) as err:
+        await api_client_confidential.get_token_by_exchange_profile(
+            subject_token="t",
+            subject_token_type="urn:x",
+            extra={"Client_ID": "x"}
+        )
+    assert "reserved" in str(err.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_get_token_by_exchange_profile_api_error(httpx_mock: HTTPXMock):
+    """Test handling of API errors from token endpoint."""
+    httpx_mock.add_response(
+        method="GET",
+        url="https://auth0.local/.well-known/openid-configuration",
+        json={"token_endpoint": "https://auth0.local/oauth/token"}
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url="https://auth0.local/oauth/token",
+        status_code=400,
+        json={"error": "invalid_grant", "error_description": "Invalid subject token"}
+    )
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret"
+    ))
+
+    with pytest.raises(ApiError) as err:
+        await api_client.get_token_by_exchange_profile(
+            subject_token="token",
+            subject_token_type="urn:example:type"
+        )
+    assert err.value.code == "invalid_grant"
+    assert err.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_get_token_by_exchange_profile_timeout(httpx_mock: HTTPXMock):
+    """Test timeout handling."""
+    httpx_mock.add_response(
+        method="GET",
+        url="https://auth0.local/.well-known/openid-configuration",
+        json={"token_endpoint": "https://auth0.local/oauth/token"}
+    )
+    httpx_mock.add_exception(httpx.TimeoutException("timeout"), method="POST")
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret"
+    ))
+
+    with pytest.raises(ApiError) as err:
+        await api_client.get_token_by_exchange_profile(
+            subject_token="token",
+            subject_token_type="urn:example:type"
+        )
+    assert err.value.code == "timeout_error"
+    assert err.value.status_code == 504
+
+
+@pytest.mark.parametrize(
+    "payload,expect",
+    [
+        ({}, "access_token"),
+        ({"access_token": ""}, "access_token"),
+        ({"access_token": None}, "access_token"),
+        ({"access_token": 123}, "access_token"),
+        ({"access_token": "token", "expires_in": "x"}, "expires_in"),
+    ],
+    ids=["missing", "empty", "none", "wrong-type", "expires-in-bad"],
+)
+@pytest.mark.asyncio
+async def test_invalid_token_endpoint_response(mock_discovery, api_client_confidential, httpx_mock, payload, expect):
+    """Test handling of invalid token endpoint responses."""
+    httpx_mock.add_response(method="POST", url="https://auth0.local/oauth/token", json=payload)
+    with pytest.raises(ApiError) as err:
+        await api_client_confidential.get_token_by_exchange_profile(subject_token="t", subject_token_type="urn:x")
+    assert expect in str(err.value).lower()
+    assert err.value.status_code == 502
