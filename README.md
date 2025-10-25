@@ -113,6 +113,74 @@ asyncio.run(main())
 
 More info https://auth0.com/docs/secure/tokens/token-vault
 
+### 5. Custom Token Exchange (Early Access)
+
+> [!NOTE]
+> This feature is currently available in [Early Access](https://auth0.com/docs/troubleshoot/product-lifecycle/product-release-stages#early-access) for Enterprise customers. Please reach out to Auth0 support to get it enabled for your tenant.
+
+This feature requires a [confidential client](https://auth0.com/docs/get-started/applications/confidential-and-public-applications#confidential-applications) (both `client_id` and `client_secret` must be configured).
+
+Custom Token Exchange allows you to exchange a subject token for Auth0 tokens using RFC 8693. This is useful for:
+- Getting Auth0 tokens for another audience
+- Integrating external identity providers
+- Migrating to Auth0
+
+```python
+import asyncio
+
+from auth0_api_python import ApiClient, ApiClientOptions
+
+async def main():
+    api_client = ApiClient(ApiClientOptions(
+        domain="<AUTH0_DOMAIN>",
+        audience="<AUTH0_AUDIENCE>",
+        client_id="<AUTH0_CLIENT_ID>",
+        client_secret="<AUTH0_CLIENT_SECRET>",
+    ))
+
+    subject_token = "..."  # Token from your legacy system or external source
+
+    result = await api_client.get_token_by_exchange_profile(
+        subject_token=subject_token,
+        subject_token_type="urn:example:subject-token",
+        audience="https://api.example.com",  # Optional - omit if your Action or tenant configuration sets the audience
+        scope="openid profile email",  # Optional
+        requested_token_type="urn:ietf:params:oauth:token-type:access_token"  # Optional
+    )
+
+    # Result contains access_token, expires_in, expires_at, and optionally id_token, refresh_token
+
+asyncio.run(main())
+```
+
+**Important:**
+- Client authentication is sent via HTTP Basic (`client_id`/`client_secret`), not in the form body.
+- The `subject_token_type` must match a Token Exchange Profile configured in Auth0. This URI identifies which profile will process the exchange and **must not** use IETF namespaces or vendor-controlled URNs; do not use Auth0/Okta namespaces. See the [Custom Token Exchange documentation](https://auth0.com/docs/authenticate/custom-token-exchange) for naming guidance.
+- If neither an explicit `audience` nor tenant/Action logic sets it, you may receive a token not targeted at your API.
+
+#### Additional Parameters
+
+You can pass additional parameters for your Token Exchange Profile or Actions via the `extra` parameter. These are sent as form fields to Auth0 and may be inspected by Actions:
+
+```python
+result = await api_client.get_token_by_exchange_profile(
+    subject_token=subject_token,
+    subject_token_type="urn:example:subject-token",
+    audience="https://api.example.com",
+    extra={
+        "device_id": "device-12345",
+        "session_id": "sess-abc"
+    }
+)
+```
+
+> [!WARNING]
+> Extra parameters are sent as form fields and may appear in logs. Do not include secrets or sensitive data. Reserved OAuth parameter names (like `grant_type`, `client_id`, `scope`) cannot be used and will raise an error. Arrays are supported but limited to 20 values per key to prevent abuse.
+
+**Related SDKs:** [auth0-auth-js](https://github.com/auth0/auth0-auth-js) (JavaScript/TypeScript)
+
+More info: https://auth0.com/docs/authenticate/custom-token-exchange
+
 #### Requiring Additional Claims
 
 If your application demands extra claims, specify them with `required_claims`:
@@ -126,7 +194,7 @@ decoded_and_verified_token = await api_client.verify_access_token(
 
 If the token lacks `my_custom_claim` or fails any standard check (issuer mismatch, expired token, invalid signature), the method raises a `VerifyAccessTokenError`.
 
-### 5. DPoP Authentication
+### 6. DPoP Authentication
 
 > [!NOTE]  
 > This feature is currently available in [Early Access](https://auth0.com/docs/troubleshoot/product-lifecycle/product-release-stages#early-access). Please reach out to Auth0 support to get it enabled for your tenant.
