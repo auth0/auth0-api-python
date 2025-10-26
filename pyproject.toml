@@ -24,6 +24,7 @@ pytest-asyncio = "^0.25.3"
 pytest-mock = "^3.15.1"
 pytest-httpx = "^0.35.0"
 ruff = ">=0.1,<0.15"
+freezegun = "^1.5.5"
 
 [tool.pytest.ini_options]
 addopts = "--cov=src --cov-report=term-missing:skip-covered --cov-report=xml"
