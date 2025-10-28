@@ -471,7 +471,7 @@ class ApiClient:
             params["login_hint"] = options["login_hint"]
 
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(self.options.timeout)) as client:
                 response = await client.post(
                     token_endpoint,
                     data=params,
@@ -479,8 +479,9 @@ class ApiClient:
                 )
 
                 if response.status_code != 200:
-                    error_data = response.json() if "json" in response.headers.get(
-                        "content-type", "").lower() else {}
+                    # Lenient check for JSON error responses (handles application/json, text/json, etc.)
+                    content_type = response.headers.get("content-type", "").lower()
+                    error_data = response.json() if "json" in content_type else {}
                     raise ApiError(
                         error_data.get("error", "connection_token_error"),
                         error_data.get(
@@ -596,7 +597,7 @@ class ApiClient:
             )
         if tok.lower().startswith("bearer "):
             raise GetTokenByExchangeProfileError(
-                "subject_token must not include the 'Bearer ' prefix"
+                "subject_token must not include the 'Bearer ' prefix (case-insensitive check)"
             )
 
         # Require client credentials
@@ -649,7 +650,9 @@ class ApiClient:
                 if response.status_code != 200:
                     error_data = {}
                     try:
-                        if "json" in response.headers.get("content-type", "").lower():
+                        # Lenient check for JSON error responses (handles application/json, text/json, etc.)
+                        content_type = response.headers.get("content-type", "").lower()
+                        if "json" in content_type:
                             error_data = response.json()
                     except ValueError:
                         pass  # Ignore JSON parse errors, use generic error message below
@@ -751,7 +754,8 @@ class ApiClient:
             # Handle sequences (list, tuple, etc.) but reject mappings/sets/bytes
             if isinstance(v, (dict, set, bytes)):
                 raise GetTokenByExchangeProfileError(
-                    f"Parameter '{k}' has unsupported type {type(v).__name__}"
+                    f"Parameter '{k}' has unsupported type {type(v).__name__}. "
+                    "Only strings, numbers, booleans, and sequences (list/tuple) are allowed"
                 )
             elif isinstance(v, (list, tuple)):
                 if len(v) > MAX_ARRAY_VALUES_PER_KEY:

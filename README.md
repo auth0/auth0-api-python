@@ -166,7 +166,7 @@ asyncio.run(main())
 
 **Important:**
 - Client authentication is sent via HTTP Basic (`client_id`/`client_secret`), not in the form body.
-- Do not prefix `subject_token` with "Bearer " - send the raw token value only.
+- Do not prefix `subject_token` with "Bearer " - send the raw token value only (checked case-insensitively).
 - The `subject_token_type` must match a Token Exchange Profile configured in Auth0. This URI identifies which profile will process the exchange and **must not use reserved OAuth namespaces (IETF or vendor-controlled)**. Use your own collision-resistant namespace. See the [Custom Token Exchange documentation](https://auth0.com/docs/authenticate/custom-token-exchange) for naming guidance.
 - If neither an explicit `audience` nor tenant/Action logic sets it, you may receive a token not targeted at your API.
 
