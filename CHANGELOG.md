@@ -1,5 +1,11 @@
 # Change Log
 
+## [1.0.0.b6](https://github.com/auth0/auth0-api-python/tree/1.0.0b6) (2025-10-29)
+[Full Changelog](https://github.com/auth0/auth0-api-python/compare/1.0.0b5...1.0.0b6)
+
+**Added**
+- feat: Add Custom Token Exchange support (RFC 8693) [\#51](https://github.com/auth0/auth0-api-python/pull/51) ([btiernay](https://github.com/btiernay))
+
 ## [1.0.0.b5](https://github.com/auth0/auth0-api-python/tree/1.0.0.b5) (2025-09-11)
 [Full Changelog](https://github.com/auth0/auth0-api-python/compare/1.0.0.b4...1.0.0.b5)
 
