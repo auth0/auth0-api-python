@@ -1,5 +1,6 @@
 import time
-from typing import Any, Optional
+from collections.abc import Mapping, Sequence
+from typing import Any, Optional, Union
 
 import httpx
 from authlib.jose import JsonWebKey, JsonWebToken
@@ -9,6 +10,7 @@ from .errors import (
     ApiError,
     BaseAuthError,
     GetAccessTokenForConnectionError,
+    GetTokenByExchangeProfileError,
     InvalidAuthSchemeError,
     InvalidDpopProofError,
     MissingAuthorizationError,
@@ -23,6 +25,20 @@ from .utils import (
     normalize_url_for_htu,
     sha256_base64url,
 )
+
+# Token Exchange constants
+TOKEN_EXCHANGE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:token-exchange"  # noqa: S105
+MAX_ARRAY_VALUES_PER_KEY = 20  # DoS protection for extra parameter arrays
+
+# OAuth parameter denylist - parameters that cannot be overridden via extras
+RESERVED_PARAMS = frozenset([
+    "grant_type", "client_id", "client_secret", "client_assertion",
+    "client_assertion_type", "subject_token", "subject_token_type",
+    "requested_token_type", "actor_token", "actor_token_type",
+    "subject_issuer", "audience", "aud", "resource", "resources",
+    "resource_indicator", "scope", "connection", "login_hint",
+    "organization", "assertion",
+])
 
 
 class ApiClient:
@@ -62,6 +78,12 @@ class ApiClient:
           • If scheme is 'DPoP', verifies both access token and DPoP proof
           • If scheme is 'Bearer', verifies only the access token
 
+        Note:
+            Authorization header parsing uses split(None, 1) to correctly handle
+            tabs and multiple spaces per HTTP specs. Malformed headers with multiple
+            spaces now raise VerifyAccessTokenError during JWT parsing (previously
+            raised InvalidAuthSchemeError).
+
         Args:
             headers: HTTP headers dict containing (header keys should be lowercase):
                 - "authorization": The Authorization header value (required)
@@ -78,6 +100,9 @@ class ApiClient:
             InvalidDpopProofError: If DPoP verification fails
             VerifyAccessTokenError: If access token verification fails
         """
+        # Normalize header keys to lowercase for robust access
+        headers = {k.lower(): v for k, v in headers.items()}
+
         authorization_header = headers.get("authorization", "")
         dpop_proof = headers.get("dpop")
 
@@ -86,22 +111,16 @@ class ApiClient:
                 raise self._prepare_error(
                         InvalidAuthSchemeError("")
                     )
-            else :
+            else:
                 raise self._prepare_error(MissingAuthorizationError())
 
-
-        parts = authorization_header.split(" ")
+        # Split authorization header on first whitespace
+        parts = authorization_header.split(None, 1)
         if len(parts) != 2:
-            if len(parts) < 2:
-                raise self._prepare_error(MissingAuthorizationError())
-            elif len(parts) > 2:
-                raise self._prepare_error(
-                    InvalidAuthSchemeError("")
-                )
+            raise self._prepare_error(MissingAuthorizationError())
 
         scheme, token = parts
-
-        scheme = scheme.strip().lower()
+        scheme = scheme.lower()
 
         if self.is_dpop_required() and scheme != "dpop":
             raise self._prepare_error(
@@ -431,7 +450,11 @@ class ApiClient:
 
         token_endpoint = metadata.get("token_endpoint")
         if not token_endpoint:
-            raise GetAccessTokenForConnectionError("Token endpoint missing in OIDC metadata")
+            raise GetAccessTokenForConnectionError(
+                "Token endpoint missing in OIDC metadata. "
+                "Verify your domain configuration and that the OIDC discovery endpoint "
+                f"(https://{self.options.domain}/.well-known/openid-configuration) is accessible"
+            )
 
         # Prepare parameters
         params = {
@@ -448,7 +471,7 @@ class ApiClient:
             params["login_hint"] = options["login_hint"]
 
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(self.options.timeout)) as client:
                 response = await client.post(
                     token_endpoint,
                     data=params,
@@ -456,8 +479,9 @@ class ApiClient:
                 )
 
                 if response.status_code != 200:
-                    error_data = response.json() if "json" in response.headers.get(
-                        "content-type", "").lower() else {}
+                    # Lenient check for JSON error responses (handles application/json, text/json, etc.)
+                    content_type = response.headers.get("content-type", "").lower()
+                    error_data = response.json() if "json" in content_type else {}
                     raise ApiError(
                         error_data.get("error", "connection_token_error"),
                         error_data.get(
@@ -467,7 +491,7 @@ class ApiClient:
 
                 try:
                     token_endpoint_response = response.json()
-                except Exception:
+                except ValueError:
                     raise ApiError("invalid_json", "Token endpoint returned invalid JSON.")
 
                 access_token = token_endpoint_response.get("access_token")
@@ -501,7 +525,247 @@ class ApiClient:
                 exc
             )
 
+    async def get_token_by_exchange_profile(
+        self,
+        subject_token: str,
+        subject_token_type: str,
+        audience: Optional[str] = None,
+        scope: Optional[str] = None,
+        requested_token_type: Optional[str] = None,
+        extra: Optional[Mapping[str, Union[str, Sequence[str]]]] = None
+    ) -> dict[str, Any]:
+        """
+        Exchange a subject token for an Auth0 token using RFC 8693.
+
+        The matching Token Exchange Profile is selected by subject_token_type.
+        This method requires a confidential client (client_id and client_secret must be configured).
+
+        Args:
+            subject_token: The token to be exchanged
+            subject_token_type: URI identifying the token type (must match a Token Exchange Profile)
+            audience: Optional target API identifier for the exchanged tokens
+            scope: Optional space-separated OAuth 2.0 scopes to request
+            requested_token_type: Optional type of token to issue (defaults to access token)
+            extra: Optional additional parameters sent as form fields to Auth0.
+                   All values are converted to strings before sending.
+                   Arrays are limited to 20 values per key for DoS protection.
+                   Cannot override reserved OAuth parameters (case-insensitive check).
+
+        Returns:
+            Dictionary containing:
+            - access_token (str): The Auth0 access token
+            - expires_in (int): Token lifetime in seconds
+            - expires_at (int): Unix timestamp when token expires
+            - id_token (str, optional): OpenID Connect ID token
+            - refresh_token (str, optional): Refresh token
+            - scope (str, optional): Granted scopes
+            - token_type (str, optional): Token type (typically "Bearer")
+            - issued_token_type (str, optional): RFC 8693 issued token type identifier
+
+        Raises:
+            MissingRequiredArgumentError: If required parameters are missing
+            GetTokenByExchangeProfileError: If client credentials not configured, validation fails,
+                                           or reserved parameters are supplied in extra
+            ApiError: If the token endpoint returns an error
+
+        Example:
+            async def example():
+                result = await api_client.get_token_by_exchange_profile(
+                    subject_token=token,
+                    subject_token_type="urn:example:subject-token",
+                    audience="https://api.backend.com"
+                )
+
+        References:
+            - Custom Token Exchange: https://auth0.com/docs/authenticate/custom-token-exchange
+            - RFC 8693: https://datatracker.ietf.org/doc/html/rfc8693
+            - Related SDK: https://github.com/auth0/auth0-auth-js
+        """
+        # Validate required parameters
+        if not subject_token:
+            raise MissingRequiredArgumentError("subject_token")
+        if not subject_token_type:
+            raise MissingRequiredArgumentError("subject_token_type")
+
+        # Validate subject token format (fail fast to ensure token integrity)
+        tok = subject_token
+        if not isinstance(tok, str) or not tok.strip():
+            raise GetTokenByExchangeProfileError("subject_token cannot be blank or whitespace")
+        if tok != tok.strip():
+            raise GetTokenByExchangeProfileError(
+                "subject_token must not include leading or trailing whitespace"
+            )
+        if tok.lower().startswith("bearer "):
+            raise GetTokenByExchangeProfileError(
+                "subject_token must not include the 'Bearer ' prefix (case-insensitive check)"
+            )
+
+        # Require client credentials
+        client_id = self.options.client_id
+        client_secret = self.options.client_secret
+        if not client_id or not client_secret:
+            raise GetTokenByExchangeProfileError(
+                "Client credentials are required to use get_token_by_exchange_profile. "
+                "Configure client_id and client_secret in ApiClientOptions to use this feature"
+            )
+
+        # Discover token endpoint
+        metadata = await self._discover()
+        token_endpoint = metadata.get("token_endpoint")
+        if not token_endpoint:
+            raise GetTokenByExchangeProfileError(
+                "Token endpoint missing in OIDC metadata. "
+                "Verify your domain configuration and that the OIDC discovery endpoint "
+                f"(https://{self.options.domain}/.well-known/openid-configuration) is accessible"
+            )
+
+        # Build request parameters (client_id sent via HTTP Basic auth only)
+        params = {
+            "grant_type": TOKEN_EXCHANGE_GRANT_TYPE,
+            "subject_token": subject_token,
+            "subject_token_type": subject_token_type,
+        }
+
+        # Add optional parameters
+        if audience:
+            params["audience"] = audience
+        if scope:
+            params["scope"] = scope
+        if requested_token_type:
+            params["requested_token_type"] = requested_token_type
+
+        # Append extra parameters with validation
+        if extra:
+            self._apply_extra(params, extra)
+
+        # Make token exchange request
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(self.options.timeout)) as client:
+                response = await client.post(
+                    token_endpoint,
+                    data=params,
+                    auth=(client_id, client_secret)
+                )
+
+                if response.status_code != 200:
+                    error_data = {}
+                    try:
+                        # Lenient check for JSON error responses (handles application/json, text/json, etc.)
+                        content_type = response.headers.get("content-type", "").lower()
+                        if "json" in content_type:
+                            error_data = response.json()
+                    except ValueError:
+                        pass  # Ignore JSON parse errors, use generic error message below
+
+                    raise ApiError(
+                        error_data.get("error", "token_exchange_error"),
+                        error_data.get(
+                            "error_description",
+                            f"Failed to exchange token of type '{subject_token_type}'"
+                            + (f" for audience '{audience}'" if audience else "")
+                        ),
+                        response.status_code
+                    )
+
+                try:
+                    token_response = response.json()
+                except ValueError:
+                    raise ApiError("invalid_json", "Token endpoint returned invalid JSON.", 502)
+
+                # Validate required fields
+                access_token = token_response.get("access_token")
+                if not isinstance(access_token, str) or not access_token:
+                    raise ApiError(
+                        "invalid_response",
+                        "Missing or invalid access_token in response.",
+                        502
+                    )
+
+                # Lenient policy: coerce numeric strings like "3600" to int
+                # Reject non-numeric values (e.g., "not-a-number", None, objects)
+                # Reject negative values (prevent accidental "already expired" tokens)
+                expires_in_raw = token_response.get("expires_in", 3600)
+                try:
+                    expires_in = int(expires_in_raw)
+                except (TypeError, ValueError):
+                    raise ApiError("invalid_response", "expires_in is not an integer.", 502)
+
+                if expires_in < 0:
+                    raise ApiError("invalid_response", "expires_in cannot be negative.", 502)
+
+                # Build response with required fields
+                result = {
+                    "access_token": access_token,
+                    "expires_in": expires_in,
+                    "expires_at": int(time.time()) + expires_in,
+                }
+
+                # Add optional fields if present (preserves falsy values like empty scope)
+                optional_fields = ["scope", "id_token", "refresh_token", "token_type", "issued_token_type"]
+                for field in optional_fields:
+                    if field in token_response:
+                        result[field] = token_response[field]
+
+                return result
+
+        except httpx.TimeoutException as exc:
+            raise ApiError(
+                "timeout_error",
+                f"Request to token endpoint timed out: {str(exc)}",
+                504,
+                exc
+            )
+        except httpx.HTTPError as exc:
+            raise ApiError(
+                "network_error",
+                f"Network error occurred: {str(exc)}",
+                502,
+                exc
+            )
+
     # ===== Private Methods =====
+
+    def _apply_extra(
+        self,
+        params: dict[str, Any],
+        extra: Mapping[str, Union[str, Sequence[str]]]
+    ) -> None:
+        """
+        Apply extra parameters to the params dict with validation.
+
+        Args:
+            params: The parameters dict to append to
+            extra: Additional parameters to append (accepts str or sequences like list/tuple)
+
+        Raises:
+            GetTokenByExchangeProfileError: If reserved parameter, unsupported type, or array size limit exceeded
+        """
+        # Pre-compute lowercase reserved params for case-insensitive matching
+        reserved_lower = {p.lower() for p in RESERVED_PARAMS}
+
+        for k, v in extra.items():
+            key = str(k)
+            # Case-insensitive check against reserved params
+            if key.lower() in reserved_lower:
+                raise GetTokenByExchangeProfileError(
+                    f"Parameter '{k}' is reserved and cannot be overridden"
+                )
+
+            # Handle sequences (list, tuple, etc.) but reject mappings/sets/bytes
+            if isinstance(v, (dict, set, bytes)):
+                raise GetTokenByExchangeProfileError(
+                    f"Parameter '{k}' has unsupported type {type(v).__name__}. "
+                    "Only strings, numbers, booleans, and sequences (list/tuple) are allowed"
+                )
+            elif isinstance(v, (list, tuple)):
+                if len(v) > MAX_ARRAY_VALUES_PER_KEY:
+                    raise GetTokenByExchangeProfileError(
+                        f"Parameter '{k}' exceeds maximum array size of {MAX_ARRAY_VALUES_PER_KEY}"
+                    )
+                # Convert sequence items to strings
+                params[key] = [str(x) for x in v]
+            else:
+                params[key] = str(v)
 
     async def _discover(self) -> dict[str, Any]:
         """Lazy-load OIDC discovery metadata."""
