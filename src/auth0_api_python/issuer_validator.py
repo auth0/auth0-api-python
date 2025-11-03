@@ -51,7 +51,7 @@ class IssuerValidator:
         domain: Optional[str] = None,
         issuers: Optional[List[str]] = None,
         issuer_resolver: Optional[Callable[[IssuerValidationContext], Any]] = None,
-        cache_ttl: int = 3600
+        cache_ttl: int = 600
     ):
         """
         Initialize the issuer validator.
@@ -60,7 +60,7 @@ class IssuerValidator:
             domain: Single domain for backward compatibility (e.g., "tenant.auth0.com")
             issuers: Static list of allowed issuer URLs
             issuer_resolver: Async function that validates issuers dynamically
-            cache_ttl: Cache time-to-live in seconds (default: 3600 = 1 hour)
+            cache_ttl: Cache time-to-live in seconds (default: 600 = 10 minutes)
             
         Raises:
             ConfigurationError: If no method is provided or multiple methods are provided

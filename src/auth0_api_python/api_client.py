@@ -606,7 +606,7 @@ class ApiClient:
         # Check cache
         if jwks_url in self._jwks_cache:
             cached_data, timestamp = self._jwks_cache[jwks_url]
-            if time.time() - timestamp < 600:  # 10 minutes
+            if time.time() - timestamp < self.options.jwks_cache_ttl:
                 return cached_data
         
         try:
