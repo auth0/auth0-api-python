@@ -2197,7 +2197,541 @@ When helping a customer integrate this SDK, verify:
 
 ---
 
-## 13. Resources for Customers
+## 13. Client-Side DPoP Proof Generation (CRITICAL - MISSING FROM EARLIER SECTIONS)
+
+### 13.1 Overview: What's Missing From This Guide
+
+**IMPORTANT**: The previous sections explained how to **verify** DPoP proofs on the backend using `auth0-api-python`, but they did NOT explain how clients **create/generate** DPoP proofs. This is a **prerequisite** for end-to-end DPoP implementation.
+
+This section fills that gap.
+
+### 13.2 DPoP Proof Requirements (RFC 9449)
+
+A DPoP proof is a JWT that the client must create for each API request. It proves the client possesses a private key.
+
+**DPoP Proof Structure:**
+
+```json
+{
+  "typ": "dpop+jwt",     // REQUIRED: Must be "dpop+jwt"
+  "alg": "ES256",        // REQUIRED: Signing algorithm (ES256, RS256, etc.)
+  "jwk": {               // REQUIRED: Public key in JWK format
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "...",
+    "y": "..."
+  }
+}
+.
+{
+  "jti": "unique-id",              // REQUIRED: Unique identifier for this proof
+  "htm": "GET",                    // REQUIRED: HTTP method (GET, POST, etc.)
+  "htu": "https://api.example.com/resource",  // REQUIRED: Target URL (no query params, no fragment)
+  "iat": 1234567890,               // REQUIRED: Unix timestamp when proof was created
+  "ath": "hash-of-token"           // OPTIONAL: Hash of access token (for token binding)
+}
+```
+
+**Key Points:**
+- Each request needs a **new DPoP proof** with unique `jti` and fresh `iat`
+- The `htu` must match the request URL (normalized: no query params, no fragment)
+- The `htm` must match the HTTP method
+- The proof is signed with a **private key**, and the **public key** is included in the `jwk` header
+- The same key pair can be reused across requests
+
+### 13.3 Client-Side Implementation (JavaScript/TypeScript)
+
+#### Option A: Using Web Crypto API (Modern Browsers)
+
+**Best for:** React, Vue, Angular, vanilla JS web apps
+
+```typescript
+// dpop-utils.ts - DPoP proof generation utility for browsers
+
+/**
+ * Generate or retrieve a persistent DPoP key pair
+ * Store in sessionStorage for the session duration
+ */
+async function getDpopKeyPair(): Promise<CryptoKeyPair> {
+  // Check if we have a stored key
+  const storedPrivateKey = sessionStorage.getItem('dpop_private_key');
+  const storedPublicKey = sessionStorage.getItem('dpop_public_key');
+  
+  if (storedPrivateKey && storedPublicKey) {
+    // Import stored keys
+    const privateKey = await crypto.subtle.importKey(
+      'jwk',
+      JSON.parse(storedPrivateKey),
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      true,
+      ['sign']
+    );
+    
+    const publicKey = await crypto.subtle.importKey(
+      'jwk',
+      JSON.parse(storedPublicKey),
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      true,
+      []
+    );
+    
+    return { privateKey, publicKey };
+  }
+  
+  // Generate new key pair
+  const keyPair = await crypto.subtle.generateKey(
+    {
+      name: 'ECDSA',
+      namedCurve: 'P-256', // Use P-256 curve for ES256
+    },
+    true, // extractable
+    ['sign', 'verify']
+  );
+  
+  // Export and store keys
+  const privateJwk = await crypto.subtle.exportKey('jwk', keyPair.privateKey);
+  const publicJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
+  
+  sessionStorage.setItem('dpop_private_key', JSON.stringify(privateJwk));
+  sessionStorage.setItem('dpop_public_key', JSON.stringify(publicJwk));
+  
+  return keyPair;
+}
+
+/**
+ * Generate a unique JTI (JWT ID) for the DPoP proof
+ */
+function generateJti(): string {
+  const array = new Uint8Array(16);
+  crypto.getRandomValues(array);
+  return Array.from(array, byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Base64URL encode (without padding)
+ */
+function base64UrlEncode(data: ArrayBuffer | string): string {
+  const base64 = typeof data === 'string' 
+    ? btoa(data)
+    : btoa(String.fromCharCode(...new Uint8Array(data)));
+  
+  return base64
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=/g, '');
+}
+
+/**
+ * Normalize URL for htu claim (remove query params and fragment)
+ */
+function normalizeUrlForHtu(url: string): string {
+  const urlObj = new URL(url);
+  return `${urlObj.protocol}//${urlObj.host}${urlObj.pathname}`;
+}
+
+/**
+ * Create a DPoP proof JWT
+ * 
+ * @param httpMethod - HTTP method (GET, POST, etc.)
+ * @param httpUrl - Full URL of the request
+ * @param accessToken - Optional access token to bind the proof to
+ * @returns DPoP proof JWT string
+ */
+export async function createDpopProof(
+  httpMethod: string,
+  httpUrl: string,
+  accessToken?: string
+): Promise<string> {
+  const keyPair = await getDpopKeyPair();
+  
+  // Export public key as JWK for the header
+  const publicJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
+  
+  // Remove private key material from JWK
+  const { d, ...publicJwkWithoutPrivate } = publicJwk as any;
+  
+  // Create JWT header
+  const header = {
+    typ: 'dpop+jwt',
+    alg: 'ES256',
+    jwk: publicJwkWithoutPrivate
+  };
+  
+  // Create JWT payload
+  const payload: any = {
+    jti: generateJti(),
+    htm: httpMethod.toUpperCase(),
+    htu: normalizeUrlForHtu(httpUrl),
+    iat: Math.floor(Date.now() / 1000)
+  };
+  
+  // Optional: Add token hash for token binding
+  if (accessToken) {
+    const encoder = new TextEncoder();
+    const tokenData = encoder.encode(accessToken);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', tokenData);
+    payload.ath = base64UrlEncode(hashBuffer);
+  }
+  
+  // Encode header and payload
+  const encodedHeader = base64UrlEncode(JSON.stringify(header));
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+  
+  // Create signature
+  const dataToSign = `${encodedHeader}.${encodedPayload}`;
+  const encoder = new TextEncoder();
+  const dataBuffer = encoder.encode(dataToSign);
+  
+  const signatureBuffer = await crypto.subtle.sign(
+    {
+      name: 'ECDSA',
+      hash: { name: 'SHA-256' }
+    },
+    keyPair.privateKey,
+    dataBuffer
+  );
+  
+  const encodedSignature = base64UrlEncode(signatureBuffer);
+  
+  // Return complete JWT
+  return `${encodedHeader}.${encodedPayload}.${encodedSignature}`;
+}
+
+/**
+ * Make a DPoP-protected API request
+ * 
+ * @param url - API endpoint URL
+ * @param options - Fetch options
+ * @param accessToken - Auth0 access token
+ * @returns Fetch response
+ */
+export async function fetchWithDpop(
+  url: string,
+  options: RequestInit,
+  accessToken: string
+): Promise<Response> {
+  const method = options.method || 'GET';
+  
+  // Generate DPoP proof
+  const dpopProof = await createDpopProof(method, url, accessToken);
+  
+  // Make request with both headers
+  return fetch(url, {
+    ...options,
+    headers: {
+      ...options.headers,
+      'Authorization': `DPoP ${accessToken}`,  // Note: DPoP scheme, not Bearer
+      'DPoP': dpopProof                         // DPoP proof header
+    }
+  });
+}
+```
+
+#### Usage in React App:
+
+```typescript
+// App.tsx
+import { useAuth0 } from '@auth0/auth0-react';
+import { fetchWithDpop } from './dpop-utils';
+
+function App() {
+  const { getAccessTokenSilently } = useAuth0();
+  
+  const callProtectedAPI = async () => {
+    try {
+      // Get access token from Auth0
+      const token = await getAccessTokenSilently();
+      
+      // Make DPoP-protected request
+      const response = await fetchWithDpop(
+        'https://api.example.com/api/users',
+        { method: 'GET' },
+        token
+      );
+      
+      if (!response.ok) {
+        throw new Error(`API Error: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      console.log('API response:', data);
+      
+    } catch (err) {
+      console.error('API call failed:', err);
+    }
+  };
+  
+  return (
+    <button onClick={callProtectedAPI}>
+      Call DPoP-Protected API
+    </button>
+  );
+}
+```
+
+### 13.4 Client-Side Implementation (Node.js/Backend)
+
+**Best for:** Node.js services calling downstream APIs with DPoP
+
+```typescript
+// dpop-utils-node.ts - DPoP for Node.js using jose library
+
+import * as jose from 'jose';
+import crypto from 'crypto';
+
+let dpopKeyPair: { privateKey: jose.KeyLike; publicKey: jose.KeyLike } | null = null;
+
+/**
+ * Get or generate DPoP key pair for Node.js
+ */
+async function getDpopKeyPair() {
+  if (dpopKeyPair) {
+    return dpopKeyPair;
+  }
+  
+  // Generate ES256 key pair
+  const { publicKey, privateKey } = await jose.generateKeyPair('ES256');
+  dpopKeyPair = { publicKey, privateKey };
+  
+  return dpopKeyPair;
+}
+
+/**
+ * Create DPoP proof using jose library
+ */
+export async function createDpopProof(
+  httpMethod: string,
+  httpUrl: string,
+  accessToken?: string
+): Promise<string> {
+  const { privateKey, publicKey } = await getDpopKeyPair();
+  
+  // Export public key as JWK
+  const publicJwk = await jose.exportJWK(publicKey);
+  
+  // Normalize URL
+  const urlObj = new URL(httpUrl);
+  const htu = `${urlObj.protocol}//${urlObj.host}${urlObj.pathname}`;
+  
+  // Create payload
+  const payload: any = {
+    jti: crypto.randomBytes(16).toString('hex'),
+    htm: httpMethod.toUpperCase(),
+    htu,
+    iat: Math.floor(Date.now() / 1000)
+  };
+  
+  // Add token hash if provided
+  if (accessToken) {
+    const hash = crypto.createHash('sha256').update(accessToken).digest();
+    payload.ath = jose.base64url.encode(hash);
+  }
+  
+  // Create and sign JWT
+  const dpopProof = await new jose.SignJWT(payload)
+    .setProtectedHeader({
+      typ: 'dpop+jwt',
+      alg: 'ES256',
+      jwk: publicJwk
+    })
+    .sign(privateKey);
+  
+  return dpopProof;
+}
+
+/**
+ * Make DPoP-protected request with axios or fetch
+ */
+export async function fetchWithDpop(
+  url: string,
+  method: string,
+  accessToken: string,
+  body?: any
+): Promise<any> {
+  const dpopProof = await createDpopProof(method, url, accessToken);
+  
+  const response = await fetch(url, {
+    method,
+    headers: {
+      'Authorization': `DPoP ${accessToken}`,
+      'DPoP': dpopProof,
+      'Content-Type': 'application/json'
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  
+  return response.json();
+}
+```
+
+**Installation for Node.js:**
+```bash
+npm install jose
+```
+
+### 13.5 Common Client-Side DPoP Issues
+
+#### Issue: "DPoP proof expired"
+**Cause**: The `iat` claim is too old  
+**Solution**: Generate a new proof for each request (don't reuse proofs)
+
+```typescript
+// ❌ WRONG - Reusing proof across requests
+const proof = await createDpopProof('GET', url, token);
+await fetch(url1, { headers: { 'DPoP': proof } });  // OK
+await fetch(url2, { headers: { 'DPoP': proof } });  // WRONG - stale iat
+
+// ✅ CORRECT - Generate new proof per request
+const proof1 = await createDpopProof('GET', url1, token);
+await fetch(url1, { headers: { 'DPoP': proof1 } });
+
+const proof2 = await createDpopProof('GET', url2, token);
+await fetch(url2, { headers: { 'DPoP': proof2 } });
+```
+
+#### Issue: "DPoP proof htu doesn't match request URL"
+**Cause**: Query parameters or fragments in `htu` claim  
+**Solution**: Normalize the URL (remove query params and fragments)
+
+```typescript
+// ❌ WRONG - Including query params in htu
+createDpopProof('GET', 'https://api.example.com/users?page=1', token);
+
+// ✅ CORRECT - Normalized URL for htu
+const fullUrl = 'https://api.example.com/users?page=1';
+const normalizedUrl = normalizeUrlForHtu(fullUrl);  // https://api.example.com/users
+createDpopProof('GET', normalizedUrl, token);
+
+// But still send the request to the full URL
+fetch('https://api.example.com/users?page=1', { ... });
+```
+
+#### Issue: "Invalid DPoP proof signature"
+**Cause**: Using wrong key, wrong algorithm, or corrupted key  
+**Solution**: Ensure ES256 algorithm and valid key pair
+
+```typescript
+// ✅ Verify your key generation
+const keyPair = await crypto.subtle.generateKey(
+  {
+    name: 'ECDSA',
+    namedCurve: 'P-256'  // Must be P-256 for ES256
+  },
+  true,
+  ['sign', 'verify']
+);
+```
+
+#### Issue: "Missing Authorization header with DPoP scheme"
+**Cause**: Using Bearer scheme instead of DPoP  
+**Solution**: Use `Authorization: DPoP <token>`, not `Bearer`
+
+```typescript
+// ❌ WRONG - Bearer scheme with DPoP proof
+headers: {
+  'Authorization': `Bearer ${token}`,  // Should be DPoP!
+  'DPoP': dpopProof
+}
+
+// ✅ CORRECT - DPoP scheme
+headers: {
+  'Authorization': `DPoP ${token}`,   // DPoP scheme
+  'DPoP': dpopProof
+}
+```
+
+### 13.6 DPoP Key Management Best Practices
+
+#### For Web Apps (Browser)
+```typescript
+// ✅ Store key in sessionStorage (cleared when browser closes)
+sessionStorage.setItem('dpop_private_key', JSON.stringify(privateJwk));
+
+// ❌ Don't use localStorage (persists across sessions, security risk)
+localStorage.setItem('dpop_private_key', ...);  // DON'T DO THIS
+```
+
+#### For Mobile Apps
+```typescript
+// ✅ Use secure storage
+// iOS: Keychain
+// Android: KeyStore
+// React Native: react-native-keychain
+
+// ❌ Don't store in AsyncStorage (not encrypted)
+```
+
+#### For Node.js Services
+```typescript
+// ✅ Keep key in memory (regenerate on restart)
+let dpopKeyPair: CryptoKeyPair | null = null;
+
+// ✅ Or store encrypted in database/secrets manager for persistence
+// ❌ Don't hardcode keys in source code
+```
+
+### 13.7 Complete End-to-End DPoP Flow
+
+```typescript
+// 1. User logs in via Auth0 (gets access token)
+const token = await getAccessTokenSilently();
+
+// 2. Client generates DPoP key pair (once per session)
+const keyPair = await getDpopKeyPair();
+
+// 3. For each API request, client creates DPoP proof
+const dpopProof = await createDpopProof('GET', apiUrl, token);
+
+// 4. Client sends request with two headers
+const response = await fetch(apiUrl, {
+  headers: {
+    'Authorization': `DPoP ${token}`,      // Access token with DPoP scheme
+    'DPoP': dpopProof                      // Fresh DPoP proof
+  }
+});
+
+// 5. Backend verifies both token and proof
+// (handled by auth0-api-python SDK automatically)
+claims = await api_client.verify_request(
+  headers=dict(request.headers),
+  http_method=request.method,
+  http_url=str(request.url)
+);
+
+// 6. Backend returns data if both are valid
+return {"data": "...", "user": claims["sub"]};
+```
+
+### 13.8 AI Agent Implementation Checklist for DPoP
+
+When implementing DPoP for a customer:
+
+#### ✅ Backend Checklist
+- [ ] Enable DPoP in ApiClient: `dpop_enabled=True`
+- [ ] Decide if DPoP is required or optional: `dpop_required=True/False`
+- [ ] Use `verify_request()` (auto-detects Bearer vs DPoP)
+- [ ] Include DPoP header in CORS: `allow_headers=["Authorization", "DPoP"]`
+
+#### ✅ Frontend Checklist  
+- [ ] Create DPoP key pair (once per session)
+- [ ] Store key securely (sessionStorage for web, Keychain for mobile)
+- [ ] Generate fresh DPoP proof for each request
+- [ ] Use `Authorization: DPoP <token>` (not Bearer)
+- [ ] Include both `Authorization` and `DPoP` headers
+- [ ] Normalize URLs for `htu` claim (no query params)
+- [ ] Match `htm` claim to HTTP method
+
+#### ✅ Testing Checklist
+- [ ] Test Bearer tokens still work (if dpop_required=False)
+- [ ] Test DPoP tokens work
+- [ ] Test DPoP proof with wrong URL fails
+- [ ] Test DPoP proof with wrong method fails
+- [ ] Test expired DPoP proof fails
+- [ ] Test reused DPoP proof fails (if iat too old)
+
+---
+
+## 14. Resources for Customers
 
 - **Auth0 Documentation**: https://auth0.com/docs
 - **SDK GitHub**: https://github.com/auth0/auth0-api-python
