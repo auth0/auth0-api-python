@@ -2731,7 +2731,217 @@ When implementing DPoP for a customer:
 
 ---
 
-## 14. Resources for Customers
+## 14. DPoP Implementation Troubleshooting (Real-World Issues)
+
+### 14.1 Common DPoP Implementation Challenge: Frontend Token Acquisition
+
+**Problem**: Customer says "DPoP isn't working" even though:
+- Backend SDK supports DPoP (`auth0-api-python` with `dpop_enabled=True`)
+- Auth0 tenant supports DPoP
+- DPoP proofs are being generated correctly
+
+**Root Cause**: Frontend Auth0 SDKs (like `@auth0/auth0-react`) don't support DPoP token **acquisition** yet.
+
+**How to Diagnose**:
+
+```typescript
+// Step 1: Check if token has DPoP binding
+const token = await getAccessTokenSilently();
+const decoded = jwt.decode(token); // Use jwt-decode library
+
+console.log('Token claims:', decoded);
+// Look for: "cnf": {"jkt": "..."} 
+
+if (!decoded.cnf || !decoded.cnf.jkt) {
+  console.log('❌ Token is NOT DPoP-bound (missing cnf.jkt claim)');
+  console.log('This is a token acquisition issue, not a verification issue');
+}
+```
+
+**AI Agent Decision Tree**:
+
+```
+Is DPoP not working?
+├─ YES → Check error message
+   ├─ "JWT Access Token has no jkt confirmation claim"
+   │  └─ Issue: Token acquisition (frontend SDK limitation)
+   │     Solution: See workarounds below
+   │
+   ├─ "DPoP proof invalid" or "DPoP proof expired"
+   │  └─ Issue: DPoP proof generation
+   │     Solution: Fix proof creation (see Section 13.5)
+   │
+   └─ "Missing DPoP header"
+      └─ Issue: Headers not being sent
+         Solution: Check CORS, verify fetchWithDpop() usage
+```
+
+### 14.2 Workarounds When Frontend SDK Doesn't Support DPoP
+
+**Option 1: Backend Proxy for Token Exchange** (Recommended for production)
+
+Create a backend endpoint that exchanges regular tokens for DPoP-bound tokens:
+
+```python
+# Backend endpoint: /api/exchange-dpop-token
+@app.post("/api/exchange-dpop-token")
+async def exchange_dpop_token(request: Request):
+    """
+    Exchange a regular Bearer token for a DPoP-bound token.
+    Client sends: Regular Bearer token + DPoP proof
+    Backend returns: DPoP-bound token
+    """
+    # Get regular token from client
+    auth_header = request.headers.get("authorization")
+    dpop_proof = request.headers.get("dpop")
+    
+    # Exchange with Auth0 (send DPoP proof during token request)
+    # Implementation depends on Auth0's token exchange API
+    
+    return {"dpop_token": "...", "token_type": "DPoP"}
+```
+
+**Option 2: Use Machine-to-Machine (M2M) Flow** (For backend/service use cases)
+
+If this is a backend service or CLI tool, use M2M credentials:
+
+```typescript
+// This works because you control the token request
+const dpopProof = await createDpopProof('POST', tokenUrl);
+
+const response = await fetch(tokenUrl, {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'DPoP': dpopProof  // Send DPoP proof during token acquisition
+  },
+  body: new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id: CLIENT_ID,
+    client_secret: CLIENT_SECRET,
+    audience: AUDIENCE
+  })
+});
+
+const { access_token, token_type } = await response.json();
+// token_type === "dpop" means token is DPoP-bound
+```
+
+**Option 3: Demonstrate DPoP Proof Generation Only**
+
+If full DPoP isn't possible yet, demonstrate the cryptographic proof mechanism:
+
+```typescript
+// Generate DPoP proof (shows the crypto is working)
+const proof = await createDpopProof('GET', apiUrl, token);
+console.log('✅ DPoP proof generated:', proof);
+
+// Use Bearer + DPoP proof (backend can validate the proof structure)
+// Note: Won't have full token binding, but shows proof generation works
+fetch(apiUrl, {
+  headers: {
+    'Authorization': `Bearer ${token}`,
+    'DPoP': proof
+  }
+});
+```
+
+### 14.3 How to Check If Auth0 Supports DPoP for Your Tenant
+
+**Quick Test** (Python script to verify):
+
+```python
+import httpx
+from authlib.jose import JsonWebKey, JsonWebToken
+
+# Generate DPoP key pair
+jwk = JsonWebKey.generate_key(kty="EC", crv_or_size="P-256", is_private=True)
+public_jwk = jwk.as_dict(is_private=False)
+
+# Create DPoP proof for token endpoint
+jwt = JsonWebToken(["ES256"])
+dpop_proof = jwt.encode(
+    {"typ": "dpop+jwt", "alg": "ES256", "jwk": public_jwk},
+    {"htu": TOKEN_URL, "htm": "POST", "iat": int(time.time()), "jti": str(uuid.uuid4())},
+    JsonWebKey.import_key(jwk.as_dict(is_private=True))
+).decode()
+
+# Request token WITH DPoP proof
+response = httpx.post(TOKEN_URL, 
+    data={
+        "grant_type": "client_credentials",
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "audience": AUDIENCE
+    },
+    headers={"DPoP": dpop_proof}
+)
+
+token_data = response.json()
+if token_data.get("token_type", "").lower() == "dpop":
+    print("✅ Auth0 supports DPoP")
+else:
+    print("❌ Auth0 returned Bearer token (DPoP not supported/enabled)")
+```
+
+### 14.4 What to Tell the Customer
+
+**If DPoP doesn't work end-to-end**:
+
+```
+DPoP authentication has two parts:
+1. ✅ DPoP Proof Generation (cryptographic signature) - This works
+2. ❌ DPoP Token Binding (Auth0 token with cnf.jkt) - SDK limitation
+
+Current situation:
+- Your backend can VERIFY DPoP proofs (auth0-api-python ✅)
+- Your Auth0 tenant SUPPORTS DPoP (verified ✅)
+- Your frontend SDK CANNOT REQUEST DPoP-bound tokens (limitation ❌)
+
+Options:
+A) Use a backend proxy to exchange tokens (recommended)
+B) Use M2M flow for server-side use cases
+C) Wait for @auth0/auth0-react to add DPoP support
+D) Implement custom token acquisition (advanced)
+
+For now, we've demonstrated:
+- DPoP proof generation (RFC 9449 compliant)
+- Backend DPoP verification (working)
+- The infrastructure is ready when SDK support arrives
+```
+
+### 14.5 AI Agent Best Practices for DPoP Implementation
+
+**Before implementing DPoP**:
+
+1. **Ask clarifying questions**:
+   - "Is this a frontend SPA or backend service?"
+   - "Do you control token acquisition or just API calls?"
+   - "Is your Auth0 tenant configured for DPoP?"
+
+2. **Set expectations early**:
+   - "Full DPoP requires both token acquisition AND verification support"
+   - "Frontend SDKs may have limitations"
+   - "We can demonstrate proof generation even if full flow isn't available"
+
+3. **Provide working alternatives**:
+   - If full DPoP won't work, implement Bearer + show DPoP proof generation
+   - Document what's needed for full DPoP
+   - Create backend proxy if customer wants production DPoP
+
+4. **Test incrementally**:
+   ```
+   Step 1: Verify backend accepts Bearer tokens ✅
+   Step 2: Generate DPoP proofs ✅
+   Step 3: Check if tokens are DPoP-bound ⚠️ (common failure point)
+   Step 4: Send DPoP request ✅ (if Step 3 succeeds)
+   ```
+
+**Don't promise what you can't deliver**: If the frontend SDK doesn't support DPoP token acquisition, be upfront about it. Customers appreciate honesty over false promises.
+
+---
+
+## 15. Resources for Customers
 
 - **Auth0 Documentation**: https://auth0.com/docs
 - **SDK GitHub**: https://github.com/auth0/auth0-api-python
