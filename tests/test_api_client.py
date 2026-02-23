@@ -20,10 +20,12 @@ from conftest import (
 from freezegun import freeze_time
 from pytest_httpx import HTTPXMock
 
-from auth0_api_python.api_client import ApiClient
+from auth0_api_python.api_client import MAX_ARRAY_VALUES_PER_KEY, ApiClient
 from auth0_api_python.config import ApiClientOptions
 from auth0_api_python.errors import (
     ApiError,
+    ConfigurationError,
+    DomainsResolverError,
     GetAccessTokenForConnectionError,
     GetTokenByExchangeProfileError,
     InvalidAuthSchemeError,
@@ -52,7 +54,7 @@ async def test_init_missing_args():
     """
     Test that providing no audience or domain raises an error.
     """
-    from auth0_api_python.errors import ConfigurationError
+
 
     # Empty domain now raises ConfigurationError (not MissingRequiredArgumentError)
     with pytest.raises(ConfigurationError):
@@ -2206,7 +2208,7 @@ async def test_get_token_by_exchange_profile_extra_params_denylist(httpx_mock: H
 @pytest.mark.asyncio
 async def test_extra_array_exact_limit_passes(mock_discovery, api_client_confidential, httpx_mock):
     """Test that array with exactly MAX_ARRAY_VALUES_PER_KEY passes."""
-    from auth0_api_python.api_client import MAX_ARRAY_VALUES_PER_KEY
+
 
     httpx_mock.add_response(
         method="POST",
@@ -2230,7 +2232,7 @@ async def test_extra_array_exact_limit_passes(mock_discovery, api_client_confide
 @pytest.mark.asyncio
 async def test_extra_array_limit(mock_discovery, api_client_confidential):
     """Test that array size limit is enforced (DoS protection)."""
-    from auth0_api_python.api_client import MAX_ARRAY_VALUES_PER_KEY
+
 
     # Create array exceeding limit
     big = list(map(str, range(MAX_ARRAY_VALUES_PER_KEY + 1)))
@@ -2618,7 +2620,6 @@ async def test_token_response_parsing(
         assert result["access_token"] == "t"
 
         # Verify expires_at calculation (deterministic with frozen time)
-        import time
         expected_expires_at = int(time.time()) + expected_expires_in
         assert result["expires_at"] == expected_expires_at
     else:
@@ -2784,7 +2785,7 @@ async def test_get_token_by_exchange_profile_custom_timeout_honored(httpx_mock: 
 @pytest.mark.asyncio
 async def test_mcd_init_missing_domain_and_domains():
     """Test that providing neither domain nor domains raises ConfigurationError."""
-    from auth0_api_python.errors import ConfigurationError
+
 
     with pytest.raises(ConfigurationError) as err:
         _ = ApiClient(ApiClientOptions(audience="my-audience"))
@@ -2842,7 +2843,7 @@ async def test_mcd_init_with_both_domain_and_domains():
 @pytest.mark.asyncio
 async def test_mcd_init_with_empty_domains_list():
     """Test that empty domains list raises ConfigurationError."""
-    from auth0_api_python.errors import ConfigurationError
+
 
     with pytest.raises(ConfigurationError) as err:
         _ = ApiClient(ApiClientOptions(
@@ -2871,7 +2872,7 @@ async def test_mcd_init_with_domains_resolver():
 @pytest.mark.asyncio
 async def test_mcd_init_with_invalid_domains_type():
     """Test that invalid domains type raises ConfigurationError."""
-    from auth0_api_python.errors import ConfigurationError
+
 
     with pytest.raises(ConfigurationError) as err:
         _ = ApiClient(ApiClientOptions(
@@ -2945,7 +2946,7 @@ async def test_mcd_resolve_allowed_domains_resolver_rejects():
 @pytest.mark.asyncio
 async def test_mcd_resolve_allowed_domains_resolver_error():
     """Test that resolver errors are wrapped in DomainsResolverError."""
-    from auth0_api_python.errors import DomainsResolverError
+
 
     def failing_resolver(context: dict) -> list[str]:
         raise ValueError("Database connection failed")
@@ -2965,7 +2966,7 @@ async def test_mcd_resolve_allowed_domains_resolver_error():
 @pytest.mark.asyncio
 async def test_mcd_resolve_allowed_domains_resolver_invalid_return_type():
     """Test that resolver must return a list."""
-    from auth0_api_python.errors import DomainsResolverError
+
 
     def bad_resolver(context: dict) -> str:
         return "tenant1.auth0.com"  # Should return list, not string
@@ -2984,7 +2985,7 @@ async def test_mcd_resolve_allowed_domains_resolver_invalid_return_type():
 @pytest.mark.asyncio
 async def test_mcd_resolve_allowed_domains_resolver_empty_list():
     """Test that resolver cannot return empty list."""
-    from auth0_api_python.errors import DomainsResolverError
+
 
     def empty_resolver(context: dict) -> list[str]:
         return []
@@ -3045,9 +3046,6 @@ async def test_mcd_resolve_allowed_domains_single_domain_mode():
 @pytest.mark.asyncio
 async def test_mcd_verify_rejects_symmetric_algorithm():
     """Test that verify_access_token rejects tokens with symmetric algorithms (HS256)."""
-    import base64
-    import json
-
     # Create a token with HS256 algorithm in header (without actually signing it)
     header = {"alg": "HS256", "typ": "JWT", "kid": "test-key"}
     payload = {
