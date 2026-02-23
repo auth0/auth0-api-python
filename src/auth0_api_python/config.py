@@ -13,7 +13,7 @@ class ApiClientOptions:
     Configuration for the ApiClient.
 
     Args:
-        domain: The Auth0 domain for single-domain mode and client flows, 
+        domain: The Auth0 domain for single-domain mode and client flows,
                 e.g., "my-tenant.us.auth0.com". Optional if domains is provided.
         domains: List of allowed domains or a resolver function for multi-domain mode.
                  Can be a static list of domain strings or a callable that returns

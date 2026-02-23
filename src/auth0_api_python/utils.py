@@ -7,7 +7,8 @@ import base64
 import hashlib
 import json
 import re
-from typing import Any, Callable, Mapping, Optional, Union
+from collections.abc import Mapping
+from typing import Any, Callable, Optional, Union
 
 import httpx
 from ada_url import URL
@@ -43,11 +44,11 @@ def parse_cache_control_max_age(headers: Mapping[str, str]) -> Optional[int]:
 def normalize_domain(domain: str) -> str:
     """
     Normalize a domain string to a standard issuer URL format.
-    
+
     Args:
-        domain: Domain string in any format (e.g., "tenant.auth0.com", 
+        domain: Domain string in any format (e.g., "tenant.auth0.com",
                 "https://tenant.auth0.com/", "TENANT.AUTH0.COM")
-    
+
     Returns:
         Normalized issuer URL (e.g., "https://tenant.auth0.com/")
 
@@ -114,14 +115,14 @@ async def fetch_jwks(
 def _decode_jwt_segment(token: Union[str, bytes], segment_index: int) -> dict:
     """
     Decode a specific segment from a JWT without verifying signature.
-    
+
     Args:
         token: The JWT token (string or bytes)
         segment_index: 0 for header, 1 for payload
-    
+
     Returns:
         Decoded segment as dictionary
-    
+
     Raises:
         ValueError: If token format is invalid
     """
@@ -143,10 +144,10 @@ def _decode_jwt_segment(token: Union[str, bytes], segment_index: int) -> dict:
 def get_unverified_header(token: Union[str, bytes]) -> dict:
     """
     Parse the JWT header without verifying signature.
-    
+
     Args:
         token: The JWT token
-    
+
     Returns:
         Decoded header as dictionary
     """
@@ -156,10 +157,10 @@ def get_unverified_header(token: Union[str, bytes]) -> dict:
 def get_unverified_payload(token: Union[str, bytes]) -> dict:
     """
     Parse the JWT payload without verifying signature.
-    
+
     Args:
         token: The JWT token
-    
+
     Returns:
         Decoded payload (claims) as dictionary
     """

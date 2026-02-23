@@ -8,7 +8,7 @@ from typing import Callable, Optional, TypedDict
 class DomainsResolverContext(TypedDict, total=False):
     """
     Context passed to domains resolver functions.
-    
+
     Attributes:
         request_url: The URL the API request was made to (optional)
         request_headers: Request headers dict (e.g., Host, X-Forwarded-Host) (optional)
@@ -37,12 +37,12 @@ Returns:
 
 Example:
     from auth0_api_python import DomainsResolverContext
-    
+
     def my_resolver(context: DomainsResolverContext) -> list[str]:
         unverified_iss = context['unverified_iss']
         request_url = context.get('request_url')
         request_headers = context.get('request_headers')
-        
+
         # Fetch allowed domains based on context
         return ['tenant1.auth0.com', 'tenant2.auth0.com']
 """

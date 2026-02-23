@@ -56,11 +56,11 @@ class ApiClient:
         # Validate audience is always required
         if not options.audience:
             raise MissingRequiredArgumentError("audience")
-        
+
         # Validate domains parameter if provided
         if options.domains is not None:
             if isinstance(options.domains, list):
-                # Static list validation 
+                # Static list validation
                 if len(options.domains) == 0:
                     raise ConfigurationError("domains list cannot be empty")
                 # Normalize and store domains
@@ -75,7 +75,7 @@ class ApiClient:
         else:
             # Single domain mode
             self._allowed_domains = None
-        
+
         # Validate domain/domains configuration
         if not options.domain and not options.domains:
             raise ConfigurationError(
@@ -111,20 +111,20 @@ class ApiClient:
     ) -> list[str]:
         """
         Resolve and validate allowed domains for the given issuer.
-        
+
         Handles three modes:
         1. Static list: Returns normalized list, validates issuer against it
         2. Dynamic resolver: Invokes resolver function, validates issuer against result
         3. Single domain: Returns None (backward compatibility, uses domain)
-        
+
         Args:
             unverified_iss: The issuer claim from the token (not yet verified)
             request_url: Optional request URL for dynamic resolvers
             request_headers: Optional request headers for dynamic resolvers
-        
+
         Returns:
             List of normalized allowed domain strings
-        
+
         Raises:
             DomainsResolverError: If resolver invocation fails
             VerifyAccessTokenError: If issuer is not in allowed domains
@@ -132,7 +132,7 @@ class ApiClient:
         # Single domain mode
         if self._allowed_domains is None:
             return None
-        
+
         # Static list mode
         if isinstance(self._allowed_domains, list):
             allowed_domains = self._allowed_domains
@@ -144,7 +144,7 @@ class ApiClient:
                 'request_headers': request_headers,
                 'unverified_iss': unverified_iss
             }
-            
+
             # Invoke resolver
             try:
                 result = self._allowed_domains(context)
@@ -152,30 +152,30 @@ class ApiClient:
                 raise DomainsResolverError(
                     f"Domains resolver function failed: {str(e)}"
                 ) from e
-            
+
             # Validate resolver result
             if not isinstance(result, list):
                 raise DomainsResolverError(
                     "Domains resolver must return a list"
                 )
-            
+
             if len(result) == 0:
                 raise DomainsResolverError(
                     "Domains resolver returned an empty list"
                 )
-            
+
             # Normalize domains from resolver
             allowed_domains = [normalize_domain(d) for d in result]
         else:
             # Should never happen due to __init__ validation
             raise ConfigurationError("Invalid _allowed_domains type")
-        
+
         # Validate issuer is in allowed domains
         if unverified_iss not in allowed_domains:
             raise VerifyAccessTokenError(
                 "Token issuer is not in the list of allowed domains"
             )
-        
+
         return allowed_domains
 
     async def verify_request(
@@ -442,15 +442,15 @@ class ApiClient:
             raise VerifyAccessTokenError(
                 f"Failed to fetch OIDC discovery metadata: {str(e)}"
             ) from e
-        
+
         # First issuer validation: Prevent issuer confusion attacks
         discovery_issuer = metadata.get("issuer")
         if not discovery_issuer:
             raise VerifyAccessTokenError("Discovery metadata missing 'issuer' field")
-        
+
         # Normalize discovery issuer for comparison
         normalized_discovery_issuer = normalize_domain(discovery_issuer)
-        
+
         if normalized_iss != normalized_discovery_issuer:
             raise VerifyAccessTokenError(
                 "Token issuer does not match the discovery issuer"
