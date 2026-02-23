@@ -5,10 +5,13 @@ from typing import Any, Optional, Union
 import httpx
 from authlib.jose import JsonWebKey, JsonWebToken
 
+from .cache import InMemoryCache
 from .config import ApiClientOptions
 from .errors import (
     ApiError,
     BaseAuthError,
+    ConfigurationError,
+    DomainsResolverError,
     GetAccessTokenForConnectionError,
     GetTokenByExchangeProfileError,
     InvalidAuthSchemeError,
@@ -22,6 +25,8 @@ from .utils import (
     fetch_jwks,
     fetch_oidc_metadata,
     get_unverified_header,
+    get_unverified_payload,
+    normalize_domain,
     normalize_url_for_htu,
     sha256_base64url,
 )
@@ -48,14 +53,46 @@ class ApiClient:
     """
 
     def __init__(self, options: ApiClientOptions):
-        if not options.domain:
-            raise MissingRequiredArgumentError("domain")
+        # Validate audience is always required
         if not options.audience:
             raise MissingRequiredArgumentError("audience")
+        
+        # Validate domains parameter if provided
+        if options.domains is not None:
+            if isinstance(options.domains, list):
+                # Static list validation 
+                if len(options.domains) == 0:
+                    raise ConfigurationError("domains list cannot be empty")
+                # Normalize and store domains
+                self._allowed_domains = [normalize_domain(d) for d in options.domains]
+            elif callable(options.domains):
+                # Dynamic resolver - store the function
+                self._allowed_domains = options.domains
+            else:
+                raise ConfigurationError(
+                    "domains must be either a list of domain strings or a callable resolver function"
+                )
+        else:
+            # Single domain mode
+            self._allowed_domains = None
+        
+        # Validate domain/domains configuration
+        if not options.domain and not options.domains:
+            raise ConfigurationError(
+                "Must provide either 'domain' or 'domains' parameter. "
+                "Use 'domain' for single-domain mode, 'domains' for multi-domain support."
+            )
 
         self.options = options
-        self._metadata: Optional[dict[str, Any]] = None
-        self._jwks_data: Optional[dict[str, Any]] = None
+
+        if options.cache_adapter:
+            self._discovery_cache = options.cache_adapter
+            self._jwks_cache = options.cache_adapter
+        else:
+            self._discovery_cache = InMemoryCache(max_entries=options.cache_max_entries)
+            self._jwks_cache = InMemoryCache(max_entries=options.cache_max_entries)
+
+        self._cache_ttl = options.cache_ttl_seconds
 
         self._jwt = JsonWebToken(["RS256"])
 
@@ -66,6 +103,80 @@ class ApiClient:
         """Check if DPoP authentication is required."""
         return getattr(self.options, "dpop_required", False)
 
+    async def _resolve_allowed_domains(
+        self,
+        unverified_iss: str,
+        request_url: Optional[str] = None,
+        request_headers: Optional[dict] = None
+    ) -> list[str]:
+        """
+        Resolve and validate allowed domains for the given issuer.
+        
+        Handles three modes:
+        1. Static list: Returns normalized list, validates issuer against it
+        2. Dynamic resolver: Invokes resolver function, validates issuer against result
+        3. Single domain: Returns None (backward compatibility, uses domain)
+        
+        Args:
+            unverified_iss: The issuer claim from the token (not yet verified)
+            request_url: Optional request URL for dynamic resolvers
+            request_headers: Optional request headers for dynamic resolvers
+        
+        Returns:
+            List of normalized allowed domain strings
+        
+        Raises:
+            DomainsResolverError: If resolver invocation fails
+            VerifyAccessTokenError: If issuer is not in allowed domains
+        """
+        # Single domain mode
+        if self._allowed_domains is None:
+            return None
+        
+        # Static list mode
+        if isinstance(self._allowed_domains, list):
+            allowed_domains = self._allowed_domains
+        # Dynamic resolver mode
+        elif callable(self._allowed_domains):
+            # Build resolver context
+            context = {
+                'request_url': request_url,
+                'request_headers': request_headers,
+                'unverified_iss': unverified_iss
+            }
+            
+            # Invoke resolver
+            try:
+                result = self._allowed_domains(context)
+            except Exception as e:
+                raise DomainsResolverError(
+                    f"Domains resolver function failed: {str(e)}"
+                ) from e
+            
+            # Validate resolver result
+            if not isinstance(result, list):
+                raise DomainsResolverError(
+                    "Domains resolver must return a list"
+                )
+            
+            if len(result) == 0:
+                raise DomainsResolverError(
+                    "Domains resolver returned an empty list"
+                )
+            
+            # Normalize domains from resolver
+            allowed_domains = [normalize_domain(d) for d in result]
+        else:
+            # Should never happen due to __init__ validation
+            raise ConfigurationError("Invalid _allowed_domains type")
+        
+        # Validate issuer is in allowed domains
+        if unverified_iss not in allowed_domains:
+            raise VerifyAccessTokenError(
+                "Token issuer is not in the list of allowed domains"
+            )
+        
+        return allowed_domains
 
     async def verify_request(
         self,
@@ -89,7 +200,7 @@ class ApiClient:
                 - "authorization": The Authorization header value (required)
                 - "dpop": The DPoP proof header value (required for DPoP)
             http_method: The HTTP method (required for DPoP)
-            http_url: The HTTP URL (required for DPoP)
+            http_url: The HTTP URL (required for DPoP, also used for MCD resolver context)
 
         Returns:
             The decoded access token claims
@@ -171,7 +282,11 @@ class ApiClient:
                 )
 
             try:
-                access_token_claims = await self.verify_access_token(token)
+                access_token_claims = await self.verify_access_token(
+                    token,
+                    request_url=http_url,
+                    request_headers=headers
+                )
             except VerifyAccessTokenError as e:
                 raise self._prepare_error(e, auth_scheme=scheme)
 
@@ -219,7 +334,11 @@ class ApiClient:
 
         if scheme == "bearer":
             try:
-                claims = await self.verify_access_token(token)
+                claims = await self.verify_access_token(
+                    token,
+                    request_url=http_url,
+                    request_headers=headers
+                )
                 if claims.get("cnf") and isinstance(claims["cnf"], dict) and claims["cnf"].get("jkt"):
                     if self.options.dpop_enabled:
                         raise self._prepare_error(
@@ -245,6 +364,8 @@ class ApiClient:
     async def verify_access_token(
         self,
         access_token: str,
+        request_url: Optional[str] = None,
+        request_headers: Optional[dict] = None,
         required_claims: Optional[list[str]] = None
     ) -> dict[str, Any]:
         """
@@ -255,25 +376,107 @@ class ApiClient:
         - Checks standard claims: 'iss', 'aud', 'exp', 'iat'
         - Checks extra required claims if 'required_claims' is provided.
 
+        Args:
+            access_token: The JWT access token to verify
+            request_url: Optional request URL for dynamic domain resolvers
+            request_headers: Optional request headers dict for dynamic domain resolvers
+            required_claims: Optional list of additional claim names that must be present
+
         Returns:
             The decoded token claims if valid.
 
         Raises:
             MissingRequiredArgumentError: If no token is provided.
             VerifyAccessTokenError: If verification fails (signature, claims mismatch, etc.).
+            DomainsResolverError: If domains resolver function fails.
         """
         if not access_token:
             raise MissingRequiredArgumentError("access_token")
 
         required_claims = required_claims or []
 
+        # Extract header and payload without signature verification
         try:
             header = get_unverified_header(access_token)
-            kid = header["kid"]
         except Exception as e:
             raise VerifyAccessTokenError(f"Failed to parse token header: {str(e)}") from e
 
-        jwks_data = await self._load_jwks()
+        # Reject symmetric algorithms
+        alg = header.get('alg', '')
+        if alg.startswith('HS'):
+            raise VerifyAccessTokenError(
+                f"Symmetric algorithm '{alg}' is not supported. "
+                "Only asymmetric algorithms (e.g., RS256) are allowed."
+            )
+
+        # Extract and validate issuer claim (before network calls)
+        try:
+            unverified_payload = get_unverified_payload(access_token)
+        except Exception as e:
+            raise VerifyAccessTokenError(f"Failed to parse token payload: {str(e)}") from e
+
+        unverified_iss = unverified_payload.get('iss')
+        if not unverified_iss:
+            raise VerifyAccessTokenError("Token missing 'iss' claim")
+
+        # Normalize issuer for validation
+        normalized_iss = normalize_domain(unverified_iss)
+
+        # Validate issuer against allowed domains (MCD)
+        if self._allowed_domains is not None:
+            await self._resolve_allowed_domains(
+                normalized_iss,
+                request_url=request_url,
+                request_headers=request_headers
+            )
+
+        # Fetch OIDC discovery metadata
+        try:
+            if self._allowed_domains is not None:
+                metadata = await self._discover(issuer=normalized_iss)
+            else:
+                metadata = await self._discover()
+        except VerifyAccessTokenError:
+            raise
+        except Exception as e:
+            raise VerifyAccessTokenError(
+                f"Failed to fetch OIDC discovery metadata: {str(e)}"
+            ) from e
+        
+        # First issuer validation: Prevent issuer confusion attacks
+        discovery_issuer = metadata.get("issuer")
+        if not discovery_issuer:
+            raise VerifyAccessTokenError("Discovery metadata missing 'issuer' field")
+        
+        # Normalize discovery issuer for comparison
+        normalized_discovery_issuer = normalize_domain(discovery_issuer)
+        
+        if normalized_iss != normalized_discovery_issuer:
+            raise VerifyAccessTokenError(
+                "Token issuer does not match the discovery issuer"
+            )
+
+        # Extract JWKS URI from discovery metadata
+        jwks_uri = metadata.get("jwks_uri")
+        if not jwks_uri:
+            raise VerifyAccessTokenError("Discovery metadata missing 'jwks_uri' field")
+
+        # Fetch JWKS from discovery's jwks_uri
+        try:
+            jwks_data = await self._fetch_jwks(jwks_uri)
+        except VerifyAccessTokenError:
+            raise
+        except Exception as e:
+            raise VerifyAccessTokenError(
+                f"Failed to fetch JWKS: {str(e)}"
+            ) from e
+
+        # Extract kid for JWKS lookup
+        kid = header.get("kid")
+        if not kid:
+            raise VerifyAccessTokenError("Token header missing 'kid' claim")
+
+        # Find matching key
         matching_key_dict = None
         for key_dict in jwks_data["keys"]:
             if key_dict.get("kid") == kid:
@@ -281,8 +484,9 @@ class ApiClient:
                 break
 
         if not matching_key_dict:
-            raise VerifyAccessTokenError(f"No matching key found for kid: {kid}")
+            raise VerifyAccessTokenError("No matching key found in JWKS")
 
+        # Import public key and verify signature
         public_key = JsonWebKey.import_key(matching_key_dict)
 
         if isinstance(access_token, str) and access_token.startswith("b'"):
@@ -292,11 +496,11 @@ class ApiClient:
         except Exception as e:
             raise VerifyAccessTokenError(f"Signature verification failed: {str(e)}") from e
 
-        metadata = await self._discover()
-        issuer = metadata["issuer"]
-
-        if claims.get("iss") != issuer:
-            raise VerifyAccessTokenError("Issuer mismatch")
+        # Second issuer validation: Ensure verified token wasn't tampered
+        if claims.get("iss") != discovery_issuer:
+            raise VerifyAccessTokenError(
+                "Verified Token issuer does not match the discovery issuer"
+            )
 
         expected_aud = self.options.audience
         actual_aud = claims.get("aud")
@@ -767,25 +971,73 @@ class ApiClient:
             else:
                 params[key] = str(v)
 
-    async def _discover(self) -> dict[str, Any]:
-        """Lazy-load OIDC discovery metadata."""
-        if self._metadata is None:
-            self._metadata = await fetch_oidc_metadata(
-                domain=self.options.domain,
-                custom_fetch=self.options.custom_fetch
-            )
-        return self._metadata
+    async def _discover(self, issuer: Optional[str] = None) -> dict[str, Any]:
+        """
+        Lazy-load OIDC discovery metadata.
 
-    async def _load_jwks(self) -> dict[str, Any]:
-        """Fetches and caches JWKS data from the OIDC metadata."""
-        if self._jwks_data is None:
-            metadata = await self._discover()
-            jwks_uri = metadata["jwks_uri"]
-            self._jwks_data = await fetch_jwks(
-                jwks_uri=jwks_uri,
-                custom_fetch=self.options.custom_fetch
-            )
-        return self._jwks_data
+        Args:
+            issuer: Optional issuer URL to fetch discovery from (MCD mode).
+                   If provided, extracts domain from issuer URL.
+                   If None, uses configured domain.
+
+        Returns:
+            OIDC discovery metadata dictionary
+        """
+        if issuer:
+            domain = issuer.replace('https://', '').replace('http://', '').rstrip('/')
+        else:
+            domain = self.options.domain
+
+        cache_key = normalize_domain(f"https://{domain}")
+
+        cached = self._discovery_cache.get(cache_key)
+        if cached:
+            return cached
+
+        metadata, max_age = await fetch_oidc_metadata(
+            domain=domain,
+            custom_fetch=self.options.custom_fetch
+        )
+
+        effective_ttl = self._cache_ttl
+        if max_age is not None and self._cache_ttl is not None:
+            effective_ttl = min(max_age, self._cache_ttl)
+        elif max_age is not None:
+            effective_ttl = max_age
+
+        self._discovery_cache.set(cache_key, metadata, ttl_seconds=effective_ttl)
+        return metadata
+
+    async def _fetch_jwks(self, jwks_uri: str) -> dict[str, Any]:
+        """
+        Fetch JWKS with per-URI caching.
+
+        Args:
+            jwks_uri: The JWKS URI to fetch from
+
+        Returns:
+            JWKS data dictionary
+
+        """
+        cache_key = jwks_uri
+
+        cached = self._jwks_cache.get(cache_key)
+        if cached:
+            return cached
+
+        jwks_data, max_age = await fetch_jwks(
+            jwks_uri=jwks_uri,
+            custom_fetch=self.options.custom_fetch
+        )
+
+        effective_ttl = self._cache_ttl
+        if max_age is not None and self._cache_ttl is not None:
+            effective_ttl = min(max_age, self._cache_ttl)
+        elif max_age is not None:
+            effective_ttl = max_age
+
+        self._jwks_cache.set(cache_key, jwks_data, ttl_seconds=effective_ttl)
+        return jwks_data
 
     def _validate_claims_presence(
         self,
