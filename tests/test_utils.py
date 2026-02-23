@@ -5,9 +5,13 @@ Tests for utility functions in auth0_api_python.utils
 import asyncio
 
 import pytest
-from auth0_api_python.utils import normalize_domain, get_unverified_payload, parse_cache_control_max_age
-from auth0_api_python.token_utils import generate_token
 
+from auth0_api_python.token_utils import generate_token
+from auth0_api_python.utils import (
+    get_unverified_payload,
+    normalize_domain,
+    parse_cache_control_max_age,
+)
 
 # ===== normalize_domain =====
 

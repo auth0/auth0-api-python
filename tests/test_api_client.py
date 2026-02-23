@@ -53,7 +53,7 @@ async def test_init_missing_args():
     Test that providing no audience or domain raises an error.
     """
     from auth0_api_python.errors import ConfigurationError
-    
+
     # Empty domain now raises ConfigurationError (not MissingRequiredArgumentError)
     with pytest.raises(ConfigurationError):
         _ = ApiClient(ApiClientOptions(domain="", audience="some_audience"))
@@ -2785,10 +2785,10 @@ async def test_get_token_by_exchange_profile_custom_timeout_honored(httpx_mock: 
 async def test_mcd_init_missing_domain_and_domains():
     """Test that providing neither domain nor domains raises ConfigurationError."""
     from auth0_api_python.errors import ConfigurationError
-    
+
     with pytest.raises(ConfigurationError) as err:
         _ = ApiClient(ApiClientOptions(audience="my-audience"))
-    
+
     assert "Must provide either 'domain' or 'domains'" in str(err.value)
 
 
@@ -2799,7 +2799,7 @@ async def test_mcd_init_with_domain_only():
         domain="auth0.local",
         audience="my-audience"
     ))
-    
+
     assert api_client.options.domain == "auth0.local"
     assert api_client.options.domains is None
     assert api_client._allowed_domains is None
@@ -2812,7 +2812,7 @@ async def test_mcd_init_with_domains_list():
         domains=["tenant1.auth0.com", "TENANT2.AUTH0.COM", "https://tenant3.auth0.com/"],
         audience="my-audience"
     ))
-    
+
     assert api_client.options.domains is not None
     assert api_client._allowed_domains == [
         "https://tenant1.auth0.com/",
@@ -2829,7 +2829,7 @@ async def test_mcd_init_with_both_domain_and_domains():
         domains=["tenant1.auth0.com", "tenant2.auth0.com"],
         audience="my-audience"
     ))
-    
+
     # Both should be stored
     assert api_client.options.domain == "auth0.local"
     assert api_client.options.domains is not None
@@ -2843,13 +2843,13 @@ async def test_mcd_init_with_both_domain_and_domains():
 async def test_mcd_init_with_empty_domains_list():
     """Test that empty domains list raises ConfigurationError."""
     from auth0_api_python.errors import ConfigurationError
-    
+
     with pytest.raises(ConfigurationError) as err:
         _ = ApiClient(ApiClientOptions(
             domains=[],
             audience="my-audience"
         ))
-    
+
     assert "domains list cannot be empty" in str(err.value)
 
 
@@ -2858,12 +2858,12 @@ async def test_mcd_init_with_domains_resolver():
     """Test that resolver function is accepted."""
     def my_resolver(context: dict) -> list[str]:
         return ["tenant1.auth0.com", "tenant2.auth0.com"]
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=my_resolver,
         audience="my-audience"
     ))
-    
+
     assert callable(api_client._allowed_domains)
     assert api_client._allowed_domains == my_resolver
 
@@ -2872,13 +2872,13 @@ async def test_mcd_init_with_domains_resolver():
 async def test_mcd_init_with_invalid_domains_type():
     """Test that invalid domains type raises ConfigurationError."""
     from auth0_api_python.errors import ConfigurationError
-    
+
     with pytest.raises(ConfigurationError) as err:
         _ = ApiClient(ApiClientOptions(
             domains="invalid-string",  # Should be list or callable
             audience="my-audience"
         ))
-    
+
     assert "must be either a list" in str(err.value)
 
 
@@ -2889,15 +2889,15 @@ async def test_mcd_resolve_allowed_domains_static_list():
         domains=["tenant1.auth0.com", "tenant2.auth0.com"],
         audience="my-audience"
     ))
-    
+
     # Valid issuer
     result = await api_client._resolve_allowed_domains("https://tenant1.auth0.com/")
     assert result == ["https://tenant1.auth0.com/", "https://tenant2.auth0.com/"]
-    
+
     # Invalid issuer
     with pytest.raises(VerifyAccessTokenError) as err:
         await api_client._resolve_allowed_domains("https://unknown.auth0.com/")
-    
+
     assert "not in the list of allowed domains" in str(err.value)
 
 
@@ -2909,16 +2909,16 @@ async def test_mcd_resolve_allowed_domains_with_resolver():
         if "tenant1" in context['unverified_iss']:
             return ["tenant1.auth0.com"]
         return ["tenant2.auth0.com", "tenant3.auth0.com"]
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=my_resolver,
         audience="my-audience"
     ))
-    
+
     # Resolver allows tenant1
     result = await api_client._resolve_allowed_domains("https://tenant1.auth0.com/")
     assert result == ["https://tenant1.auth0.com/"]
-    
+
     # Resolver allows tenant2
     result = await api_client._resolve_allowed_domains("https://tenant2.auth0.com/")
     assert result == ["https://tenant2.auth0.com/", "https://tenant3.auth0.com/"]
@@ -2929,16 +2929,16 @@ async def test_mcd_resolve_allowed_domains_resolver_rejects():
     """Test that resolver can reject issuers by not including them."""
     def my_resolver(context: dict) -> list[str]:
         return ["tenant1.auth0.com"]  # Only allows tenant1
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=my_resolver,
         audience="my-audience"
     ))
-    
+
     # Resolver rejects tenant2
     with pytest.raises(VerifyAccessTokenError) as err:
         await api_client._resolve_allowed_domains("https://tenant2.auth0.com/")
-    
+
     assert "not in the list of allowed domains" in str(err.value)
 
 
@@ -2946,18 +2946,18 @@ async def test_mcd_resolve_allowed_domains_resolver_rejects():
 async def test_mcd_resolve_allowed_domains_resolver_error():
     """Test that resolver errors are wrapped in DomainsResolverError."""
     from auth0_api_python.errors import DomainsResolverError
-    
+
     def failing_resolver(context: dict) -> list[str]:
         raise ValueError("Database connection failed")
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=failing_resolver,
         audience="my-audience"
     ))
-    
+
     with pytest.raises(DomainsResolverError) as err:
         await api_client._resolve_allowed_domains("https://tenant1.auth0.com/")
-    
+
     assert "Domains resolver function failed" in str(err.value)
     assert "Database connection failed" in str(err.value)
 
@@ -2966,18 +2966,18 @@ async def test_mcd_resolve_allowed_domains_resolver_error():
 async def test_mcd_resolve_allowed_domains_resolver_invalid_return_type():
     """Test that resolver must return a list."""
     from auth0_api_python.errors import DomainsResolverError
-    
+
     def bad_resolver(context: dict) -> str:
         return "tenant1.auth0.com"  # Should return list, not string
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=bad_resolver,
         audience="my-audience"
     ))
-    
+
     with pytest.raises(DomainsResolverError) as err:
         await api_client._resolve_allowed_domains("https://tenant1.auth0.com/")
-    
+
     assert "must return a list" in str(err.value)
 
 
@@ -2985,18 +2985,18 @@ async def test_mcd_resolve_allowed_domains_resolver_invalid_return_type():
 async def test_mcd_resolve_allowed_domains_resolver_empty_list():
     """Test that resolver cannot return empty list."""
     from auth0_api_python.errors import DomainsResolverError
-    
+
     def empty_resolver(context: dict) -> list[str]:
         return []
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=empty_resolver,
         audience="my-audience"
     ))
-    
+
     with pytest.raises(DomainsResolverError) as err:
         await api_client._resolve_allowed_domains("https://tenant1.auth0.com/")
-    
+
     assert "returned an empty list" in str(err.value)
 
 
@@ -3004,16 +3004,16 @@ async def test_mcd_resolve_allowed_domains_resolver_empty_list():
 async def test_mcd_resolve_allowed_domains_resolver_receives_context():
     """Test that resolver receives correct context with unverified_iss, request_url, and request_headers."""
     received_context = {}
-    
+
     def context_capture_resolver(context: dict) -> list[str]:
         received_context.update(context)
         return ["tenant1.auth0.com"]
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=context_capture_resolver,
         audience="my-audience"
     ))
-    
+
     # Call with request_url and request_headers
     mock_url = "https://api.example.com/protected"
     mock_headers = {"host": "api.example.com", "user-agent": "test"}
@@ -3022,7 +3022,7 @@ async def test_mcd_resolve_allowed_domains_resolver_receives_context():
         request_url=mock_url,
         request_headers=mock_headers
     )
-    
+
     # Verify context was passed correctly (matching TypeScript SDK structure)
     assert received_context['unverified_iss'] == "https://tenant1.auth0.com/"
     assert received_context['request_url'] == mock_url
@@ -3036,7 +3036,7 @@ async def test_mcd_resolve_allowed_domains_single_domain_mode():
         domain="auth0.local",
         audience="my-audience"
     ))
-    
+
     # Single domain mode should return None
     result = await api_client._resolve_allowed_domains("https://auth0.local/")
     assert result is None
@@ -3047,7 +3047,7 @@ async def test_mcd_verify_rejects_symmetric_algorithm():
     """Test that verify_access_token rejects tokens with symmetric algorithms (HS256)."""
     import base64
     import json
-    
+
     # Create a token with HS256 algorithm in header (without actually signing it)
     header = {"alg": "HS256", "typ": "JWT", "kid": "test-key"}
     payload = {
@@ -3057,22 +3057,22 @@ async def test_mcd_verify_rejects_symmetric_algorithm():
         "exp": 9999999999,
         "iat": 1000000000
     }
-    
+
     # Encode header and payload (signature doesn't matter for this test)
     header_b64 = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip('=')
     payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip('=')
     fake_signature = "fake_signature"
     hs256_token = f"{header_b64}.{payload_b64}.{fake_signature}"
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=["tenant1.auth0.com"],
         audience="my-audience"
     ))
-    
+
     # Should reject immediately without network calls
     with pytest.raises(VerifyAccessTokenError) as err:
         await api_client.verify_access_token(hs256_token)
-    
+
     assert "Symmetric algorithm 'HS256' is not supported" in str(err.value)
 
 
@@ -3086,21 +3086,21 @@ async def test_mcd_verify_early_issuer_validation(httpx_mock):
         audience="my-audience",
         issuer="https://disallowed-tenant.auth0.com/"
     )
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=["tenant1.auth0.com", "tenant2.auth0.com"],
         audience="my-audience"
     ))
-    
+
     # Mock should NOT be called because issuer validation happens first
     # If JWKS is fetched, test will fail because no mock is registered
-    
+
     with pytest.raises(VerifyAccessTokenError) as err:
         await api_client.verify_access_token(token)
-    
+
     # Verify the error is about issuer not being allowed
     assert "not in the list of allowed domains" in str(err.value)
-    
+
     # Verify no HTTP calls were made (JWKS fetch was skipped)
     assert len(httpx_mock.get_requests()) == 0
 
@@ -3115,7 +3115,7 @@ async def test_mcd_discovery_uses_token_issuer(httpx_mock):
         audience="my-audience",
         issuer="https://tenant1.auth0.com/"
     )
-    
+
     # Mock discovery for tenant1 (token's issuer)
     httpx_mock.add_response(
         method="GET",
@@ -3125,7 +3125,7 @@ async def test_mcd_discovery_uses_token_issuer(httpx_mock):
             "jwks_uri": "https://tenant1.auth0.com/.well-known/jwks.json"
         }
     )
-    
+
     # Mock JWKS for tenant1
     httpx_mock.add_response(
         method="GET",
@@ -3143,18 +3143,18 @@ async def test_mcd_discovery_uses_token_issuer(httpx_mock):
             ]
         }
     )
-    
+
     # Create client with multiple domains
     api_client = ApiClient(ApiClientOptions(
         domains=["tenant1.auth0.com", "tenant2.auth0.com"],
         audience="my-audience"
     ))
-    
+
     # Verify token - should use tenant1's discovery
     claims = await api_client.verify_access_token(token)
-    
+
     assert claims["sub"] == "user123"
-    
+
     # Verify the correct discovery URL was called
     requests = httpx_mock.get_requests()
     discovery_requests = [r for r in requests if 'openid-configuration' in str(r.url)]
@@ -3172,7 +3172,7 @@ async def test_mcd_first_issuer_validation(httpx_mock):
         audience="my-audience",
         issuer="https://tenant1.auth0.com/"
     )
-    
+
     # Mock discovery that returns DIFFERENT issuer (attack scenario)
     httpx_mock.add_response(
         method="GET",
@@ -3182,16 +3182,16 @@ async def test_mcd_first_issuer_validation(httpx_mock):
             "jwks_uri": "https://tenant1.auth0.com/.well-known/jwks.json"
         }
     )
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=["tenant1.auth0.com"],
         audience="my-audience"
     ))
-    
+
     # Should fail at first issuer validation (before JWKS fetch)
     with pytest.raises(VerifyAccessTokenError) as err:
         await api_client.verify_access_token(token)
-    
+
     assert "token issuer does not match the discovery issuer" in str(err.value).lower()
 
 
@@ -3204,7 +3204,7 @@ async def test_mcd_discovery_missing_issuer_field(httpx_mock):
         audience="my-audience",
         issuer="https://tenant1.auth0.com/"
     )
-    
+
     # Mock discovery WITHOUT issuer field
     httpx_mock.add_response(
         method="GET",
@@ -3214,15 +3214,15 @@ async def test_mcd_discovery_missing_issuer_field(httpx_mock):
             # Missing "issuer" field
         }
     )
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=["tenant1.auth0.com"],
         audience="my-audience"
     ))
-    
+
     with pytest.raises(VerifyAccessTokenError) as err:
         await api_client.verify_access_token(token)
-    
+
     assert "missing 'issuer' field" in str(err.value).lower()
 
 
@@ -3235,7 +3235,7 @@ async def test_mcd_discovery_missing_jwks_uri_field(httpx_mock):
         audience="my-audience",
         issuer="https://tenant1.auth0.com/"
     )
-    
+
     # Mock discovery WITHOUT jwks_uri field
     httpx_mock.add_response(
         method="GET",
@@ -3245,15 +3245,15 @@ async def test_mcd_discovery_missing_jwks_uri_field(httpx_mock):
             # Missing "jwks_uri" field
         }
     )
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=["tenant1.auth0.com"],
         audience="my-audience"
     ))
-    
+
     with pytest.raises(VerifyAccessTokenError) as err:
         await api_client.verify_access_token(token)
-    
+
     assert "missing 'jwks_uri' field" in str(err.value).lower()
 
 
@@ -3267,7 +3267,7 @@ async def test_mcd_jwks_fetched_from_issuer_jwks_uri(httpx_mock):
         audience="my-audience",
         issuer="https://tenant1.auth0.com/"
     )
-    
+
     # Mock discovery for tenant1 with specific jwks_uri
     httpx_mock.add_response(
         method="GET",
@@ -3277,7 +3277,7 @@ async def test_mcd_jwks_fetched_from_issuer_jwks_uri(httpx_mock):
             "jwks_uri": "https://tenant1.auth0.com/.well-known/jwks.json"  # Tenant-specific
         }
     )
-    
+
     # Mock JWKS for tenant1
     httpx_mock.add_response(
         method="GET",
@@ -3295,17 +3295,17 @@ async def test_mcd_jwks_fetched_from_issuer_jwks_uri(httpx_mock):
             ]
         }
     )
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=["tenant1.auth0.com", "tenant2.auth0.com"],
         audience="my-audience"
     ))
-    
+
     # Verify token - should fetch JWKS from tenant1's specific URI
     claims = await api_client.verify_access_token(token)
-    
+
     assert claims["sub"] == "user123"
-    
+
     # Verify JWKS was fetched from tenant1's specific URI
     requests = httpx_mock.get_requests()
     jwks_requests = [r for r in requests if 'jwks.json' in str(r.url)]
@@ -3323,7 +3323,7 @@ async def test_mcd_signature_verification_with_correct_key(httpx_mock):
         audience="my-audience",
         issuer="https://tenant1.auth0.com/"
     )
-    
+
     # Mock discovery
     httpx_mock.add_response(
         method="GET",
@@ -3333,7 +3333,7 @@ async def test_mcd_signature_verification_with_correct_key(httpx_mock):
             "jwks_uri": "https://tenant1.auth0.com/.well-known/jwks.json"
         }
     )
-    
+
     # Mock JWKS with multiple keys - correct key is TEST_KEY
     httpx_mock.add_response(
         method="GET",
@@ -3359,15 +3359,15 @@ async def test_mcd_signature_verification_with_correct_key(httpx_mock):
             ]
         }
     )
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=["tenant1.auth0.com"],
         audience="my-audience"
     ))
-    
+
     # Should successfully verify using TEST_KEY (not OTHER_KEY)
     claims = await api_client.verify_access_token(token)
-    
+
     assert claims["sub"] == "user123"
 
 
@@ -3381,7 +3381,7 @@ async def test_mcd_jwks_no_matching_kid(httpx_mock):
         audience="my-audience",
         issuer="https://tenant1.auth0.com/"
     )
-    
+
     # Mock discovery
     httpx_mock.add_response(
         method="GET",
@@ -3391,7 +3391,7 @@ async def test_mcd_jwks_no_matching_kid(httpx_mock):
             "jwks_uri": "https://tenant1.auth0.com/.well-known/jwks.json"
         }
     )
-    
+
     # Mock JWKS with keys that DON'T match token's kid
     httpx_mock.add_response(
         method="GET",
@@ -3417,16 +3417,16 @@ async def test_mcd_jwks_no_matching_kid(httpx_mock):
             ]
         }
     )
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=["tenant1.auth0.com"],
         audience="my-audience"
     ))
-    
+
     # Should fail with clear error about missing kid
     with pytest.raises(VerifyAccessTokenError) as err:
         await api_client.verify_access_token(token)
-    
+
     assert "no matching key found in jwks" in str(err.value).lower()
 
 
@@ -3440,14 +3440,14 @@ async def test_mcd_discovery_cached_per_issuer(httpx_mock):
         audience="my-audience",
         issuer="https://tenant1.auth0.com/"
     )
-    
+
     token2 = await generate_token(
         domain="tenant2.auth0.com",
         user_id="user456",
         audience="my-audience",
         issuer="https://tenant2.auth0.com/"
     )
-    
+
     # Mock discovery for tenant1
     httpx_mock.add_response(
         method="GET",
@@ -3457,7 +3457,7 @@ async def test_mcd_discovery_cached_per_issuer(httpx_mock):
             "jwks_uri": "https://tenant1.auth0.com/.well-known/jwks.json"
         }
     )
-    
+
     # Mock JWKS for tenant1
     httpx_mock.add_response(
         method="GET",
@@ -3475,7 +3475,7 @@ async def test_mcd_discovery_cached_per_issuer(httpx_mock):
             ]
         }
     )
-    
+
     # Mock discovery for tenant2
     httpx_mock.add_response(
         method="GET",
@@ -3485,7 +3485,7 @@ async def test_mcd_discovery_cached_per_issuer(httpx_mock):
             "jwks_uri": "https://tenant2.auth0.com/.well-known/jwks.json"
         }
     )
-    
+
     # Mock JWKS for tenant2
     httpx_mock.add_response(
         method="GET",
@@ -3503,19 +3503,19 @@ async def test_mcd_discovery_cached_per_issuer(httpx_mock):
             ]
         }
     )
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=["tenant1.auth0.com", "tenant2.auth0.com"],
         audience="my-audience"
     ))
-    
+
     # Verify both tokens - should cache separately
     claims1 = await api_client.verify_access_token(token1)
     claims2 = await api_client.verify_access_token(token2)
-    
+
     assert claims1["sub"] == "user123"
     assert claims2["sub"] == "user456"
-    
+
     # Verify both discovery endpoints were called
     requests = httpx_mock.get_requests()
     discovery_requests = [r for r in requests if 'openid-configuration' in str(r.url)]
@@ -3532,14 +3532,14 @@ async def test_mcd_discovery_cache_hit(httpx_mock):
         audience="my-audience",
         issuer="https://tenant1.auth0.com/"
     )
-    
+
     token2 = await generate_token(
         domain="tenant1.auth0.com",
         user_id="user456",
         audience="my-audience",
         issuer="https://tenant1.auth0.com/"
     )
-    
+
     # Mock discovery for tenant1 (only once)
     httpx_mock.add_response(
         method="GET",
@@ -3549,7 +3549,7 @@ async def test_mcd_discovery_cache_hit(httpx_mock):
             "jwks_uri": "https://tenant1.auth0.com/.well-known/jwks.json"
         }
     )
-    
+
     # Mock JWKS for tenant1 (only once)
     httpx_mock.add_response(
         method="GET",
@@ -3567,25 +3567,25 @@ async def test_mcd_discovery_cache_hit(httpx_mock):
             ]
         }
     )
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=["tenant1.auth0.com"],
         audience="my-audience"
     ))
-    
+
     # Verify first token - fetches from network
     claims1 = await api_client.verify_access_token(token1)
     assert claims1["sub"] == "user123"
-    
+
     # Verify second token - should use cache (no additional HTTP calls)
     claims2 = await api_client.verify_access_token(token2)
     assert claims2["sub"] == "user456"
-    
+
     # Verify discovery was only called once
     requests = httpx_mock.get_requests()
     discovery_requests = [r for r in requests if 'openid-configuration' in str(r.url)]
     assert len(discovery_requests) == 1
-    
+
     # Verify JWKS was only called once
     jwks_requests = [r for r in requests if 'jwks.json' in str(r.url)]
     assert len(jwks_requests) == 1
@@ -3600,7 +3600,7 @@ async def test_mcd_jwks_cached_per_uri(httpx_mock):
         audience="my-audience",
         issuer="https://tenant1.auth0.com/"
     )
-    
+
     # Mock discovery
     httpx_mock.add_response(
         method="GET",
@@ -3610,7 +3610,7 @@ async def test_mcd_jwks_cached_per_uri(httpx_mock):
             "jwks_uri": "https://tenant1.auth0.com/.well-known/jwks.json"
         }
     )
-    
+
     # Mock JWKS
     httpx_mock.add_response(
         method="GET",
@@ -3628,16 +3628,16 @@ async def test_mcd_jwks_cached_per_uri(httpx_mock):
             ]
         }
     )
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=["tenant1.auth0.com"],
         audience="my-audience"
     ))
-    
+
     # Verify token
     claims = await api_client.verify_access_token(token)
     assert claims["sub"] == "user123"
-    
+
     # Verify cache key is based on jwks_uri
     cache_key = "https://tenant1.auth0.com/.well-known/jwks.json"
     cached_jwks = api_client._jwks_cache.get(cache_key)
@@ -3654,14 +3654,14 @@ async def test_mcd_jwks_cache_hit(httpx_mock):
         audience="my-audience",
         issuer="https://tenant1.auth0.com/"
     )
-    
+
     token2 = await generate_token(
         domain="tenant1.auth0.com",
         user_id="user456",
         audience="my-audience",
         issuer="https://tenant1.auth0.com/"
     )
-    
+
     # Mock discovery (once)
     httpx_mock.add_response(
         method="GET",
@@ -3671,7 +3671,7 @@ async def test_mcd_jwks_cache_hit(httpx_mock):
             "jwks_uri": "https://tenant1.auth0.com/.well-known/jwks.json"
         }
     )
-    
+
     # Mock JWKS (once)
     httpx_mock.add_response(
         method="GET",
@@ -3689,19 +3689,19 @@ async def test_mcd_jwks_cache_hit(httpx_mock):
             ]
         }
     )
-    
+
     api_client = ApiClient(ApiClientOptions(
         domains=["tenant1.auth0.com"],
         audience="my-audience"
     ))
-    
+
     # Verify both tokens
     claims1 = await api_client.verify_access_token(token1)
     claims2 = await api_client.verify_access_token(token2)
-    
+
     assert claims1["sub"] == "user123"
     assert claims2["sub"] == "user456"
-    
+
     # Verify JWKS was only fetched once
     requests = httpx_mock.get_requests()
     jwks_requests = [r for r in requests if 'jwks.json' in str(r.url)]
@@ -3716,7 +3716,7 @@ async def test_mcd_cache_max_entries_configuration(httpx_mock):
         audience="my-audience",
         cache_max_entries=2
     ))
-    
+
     # Verify both caches have correct max_entries
     assert api_client._discovery_cache._max_entries == 2
     assert api_client._jwks_cache._max_entries == 2
