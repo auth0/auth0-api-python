@@ -108,7 +108,7 @@ class ApiClient:
         unverified_iss: str,
         request_url: Optional[str] = None,
         request_headers: Optional[dict] = None
-    ) -> list[str]:
+    ) -> Optional[list[str]]:
         """
         Resolve and validate allowed domains for the given issuer.
 
