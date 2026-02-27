@@ -143,7 +143,6 @@ class ApiClient:
             allowed_domains = self._allowed_domains
         # Dynamic resolver mode
         elif callable(self._allowed_domains):
-            resolver = self._allowed_domains
             # Build resolver context
             context = {
                 'request_url': request_url,
@@ -153,7 +152,7 @@ class ApiClient:
 
             # Invoke resolver (supports both sync and async resolvers)
             try:
-                result = resolver(context)
+                result = self._allowed_domains(context)
                 if asyncio.iscoroutine(result) or asyncio.isfuture(result):
                     result = await result
             except Exception as e:
