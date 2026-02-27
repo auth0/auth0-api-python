@@ -2,7 +2,8 @@
 Type definitions for auth0-api-python SDK
 """
 
-from typing import Callable, Optional, TypedDict
+from collections.abc import Awaitable, Callable
+from typing import Optional, TypedDict, Union
 
 
 class DomainsResolverContext(TypedDict, total=False):
@@ -12,19 +13,20 @@ class DomainsResolverContext(TypedDict, total=False):
     Attributes:
         request_url: The URL the API request was made to (optional)
         request_headers: Request headers dict (e.g., Host, X-Forwarded-Host) (optional)
-        unverified_iss: The issuer claim from the unverified token (required)
+        unverified_iss: The issuer claim from the unverified token
     """
     request_url: Optional[str]
     request_headers: Optional[dict]
-    unverified_iss: str  # This is required, others are optional
+    unverified_iss: str
 
-
-DomainsResolver = Callable[[DomainsResolverContext], list[str]]
+DomainsResolver = Callable[
+    [DomainsResolverContext], Union[list[str], Awaitable[list[str]]]
+]
 """
 Type alias for domains resolver function.
 
-A DomainsResolver is a function that receives a DomainsResolverContext and returns
-a list of allowed domain strings.
+A DomainsResolver is a sync or async function that receives a DomainsResolverContext
+and returns a list of allowed domain strings.
 
 Args:
     context (DomainsResolverContext): Dictionary containing:
@@ -35,14 +37,17 @@ Args:
 Returns:
     list[str]: List of allowed domain strings (e.g., ['tenant.auth0.com'])
 
-Example:
+Example (sync):
     from auth0_api_python import DomainsResolverContext
 
     def my_resolver(context: DomainsResolverContext) -> list[str]:
-        unverified_iss = context['unverified_iss']
-        request_url = context.get('request_url')
-        request_headers = context.get('request_headers')
+        host = (context.get('request_headers') or {}).get('host')
+        if host == 'api.brand.com':
+            return ['brand.custom-domain.com']
+        return ['tenant.auth0.com']
 
-        # Fetch allowed domains based on context
-        return ['tenant1.auth0.com', 'tenant2.auth0.com']
+Example (async):
+    async def my_async_resolver(context: DomainsResolverContext) -> list[str]:
+        domains = await db.lookup_domains(context['unverified_iss'])
+        return domains
 """

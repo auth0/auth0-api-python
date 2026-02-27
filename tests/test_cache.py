@@ -111,6 +111,16 @@ def test_in_memory_cache_no_ttl():
     assert cache.get("key1") == "value1"
 
 
+def test_in_memory_cache_ttl_zero_expires_immediately():
+    """Test that ttl_seconds=0 means entries expire immediately (always refetch)."""
+    cache = InMemoryCache()
+
+    cache.set("key1", "value1", ttl_seconds=0)
+
+    # Entry should be immediately expired — forces refetch on next access
+    assert cache.get("key1") is None
+
+
 # ===== LRU Eviction =====
 
 

@@ -27,8 +27,9 @@ def test_normalize_domain_with_https():
 
 
 def test_normalize_domain_with_http():
-    """Test normalization of domain with http:// prefix (converts to https)."""
-    assert normalize_domain("http://tenant.auth0.com") == "https://tenant.auth0.com/"
+    """Test that http:// prefix is rejected (https required)."""
+    with pytest.raises(ValueError, match="https required"):
+        normalize_domain("http://tenant.auth0.com")
 
 
 def test_normalize_domain_with_trailing_slash():
@@ -64,6 +65,45 @@ def test_normalize_domain_custom_domain():
 def test_normalize_domain_multiple_slashes():
     """Test normalization with multiple trailing slashes."""
     assert normalize_domain("tenant.auth0.com///") == "https://tenant.auth0.com/"
+    
+
+def test_normalize_domain_rejects_path():
+    """Test that domain with path segments is rejected."""
+    with pytest.raises(ValueError, match="path/query/fragment are not allowed"):
+        normalize_domain("tenant.auth0.com/some/path")
+
+
+def test_normalize_domain_rejects_query():
+    """Test that domain with query string is rejected."""
+    with pytest.raises(ValueError, match="path/query/fragment are not allowed"):
+        normalize_domain("tenant.auth0.com?foo=bar")
+
+
+def test_normalize_domain_rejects_fragment():
+    """Test that domain with fragment is rejected."""
+    with pytest.raises(ValueError, match="path/query/fragment are not allowed"):
+        normalize_domain("tenant.auth0.com#section")
+
+
+def test_normalize_domain_rejects_credentials():
+    """Test that domain with credentials is rejected."""
+    with pytest.raises(ValueError, match="credentials are not allowed"):
+        normalize_domain("user:pass@tenant.auth0.com")
+
+
+def test_normalize_domain_rejects_http():
+    """Test that http:// scheme is rejected (must use https)."""
+    with pytest.raises(ValueError, match="https required"):
+        normalize_domain("http://tenant.auth0.com")
+
+
+def test_normalize_domain_rejects_empty():
+    """Test that empty and whitespace-only strings are rejected."""
+    with pytest.raises(ValueError, match="non-empty string"):
+        normalize_domain("")
+
+    with pytest.raises(ValueError, match="non-empty string"):
+        normalize_domain("   ")
 
 
 # ===== get_unverified_payload =====

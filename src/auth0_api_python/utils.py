@@ -53,10 +53,33 @@ def normalize_domain(domain: str) -> str:
         Normalized issuer URL (e.g., "https://tenant.auth0.com/")
 
     """
+    if not isinstance(domain, str) or not domain.strip():
+        raise ValueError("domain must be a non-empty string")
+
     domain = domain.strip().lower()
-    domain = domain.replace('http://', '').replace('https://', '')
-    domain = domain.rstrip('/')
-    return f"https://{domain}/"
+
+    # Reject http:// explicitly
+    if domain.startswith('http://'):
+        raise ValueError("invalid domain URL (https required)")
+
+    # Strip https:// prefix
+    domain = domain.replace('https://', '')
+
+    # Split host from any path/query/fragment
+    host = domain.split('/')[0].split('?')[0].split('#')[0]
+
+    # Reject credentials
+    if '@' in host:
+        raise ValueError("invalid domain URL (credentials are not allowed)")
+
+    # Check for path segments, query, or fragment
+    bare = domain.rstrip('/')
+    if bare != host:
+        raise ValueError(
+            "invalid domain URL (path/query/fragment are not allowed)"
+        )
+
+    return f"https://{host}/"
 
 
 async def fetch_oidc_metadata(

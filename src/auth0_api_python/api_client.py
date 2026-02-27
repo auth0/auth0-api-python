@@ -1,3 +1,4 @@
+import asyncio
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional, Union
@@ -63,6 +64,10 @@ class ApiClient:
                 # Static list validation
                 if len(options.domains) == 0:
                     raise ConfigurationError("domains list cannot be empty")
+                if not all(isinstance(d, str) and d.strip() for d in options.domains):
+                    raise ConfigurationError(
+                        "domains list must contain only non-empty strings"
+                    )
                 # Normalize and store domains
                 self._allowed_domains = [normalize_domain(d) for d in options.domains]
             elif callable(options.domains):
@@ -145,9 +150,11 @@ class ApiClient:
                 'unverified_iss': unverified_iss
             }
 
-            # Invoke resolver
+            # Invoke resolver (supports both sync and async resolvers)
             try:
                 result = self._allowed_domains(context)
+                if asyncio.iscoroutine(result) or asyncio.isfuture(result):
+                    result = await result
             except Exception as e:
                 raise DomainsResolverError(
                     f"Domains resolver function failed: {str(e)}"
@@ -162,6 +169,11 @@ class ApiClient:
             if len(result) == 0:
                 raise DomainsResolverError(
                     "Domains resolver returned an empty list"
+                )
+
+            if not all(isinstance(d, str) and d.strip() for d in result):
+                raise DomainsResolverError(
+                    "Domains resolver must return a list of non-empty strings"
                 )
 
             # Normalize domains from resolver
@@ -984,11 +996,11 @@ class ApiClient:
             OIDC discovery metadata dictionary
         """
         if issuer:
+            cache_key = issuer  # Already normalized by caller
             domain = issuer.replace('https://', '').replace('http://', '').rstrip('/')
         else:
             domain = self.options.domain
-
-        cache_key = normalize_domain(f"https://{domain}")
+            cache_key = normalize_domain(f"https://{domain}")
 
         cached = self._discovery_cache.get(cache_key)
         if cached:

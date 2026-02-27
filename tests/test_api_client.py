@@ -1,7 +1,6 @@
 import base64
 import json
 import time
-from datetime import datetime
 
 import httpx
 import pytest
@@ -2884,6 +2883,28 @@ async def test_mcd_init_with_invalid_domains_type():
 
 
 @pytest.mark.asyncio
+async def test_mcd_init_with_non_string_domains_list():
+    """Test that domains list with non-string items raises ConfigurationError."""
+    with pytest.raises(ConfigurationError, match="non-empty strings"):
+        ApiClient(ApiClientOptions(
+            domains=[123, "tenant.auth0.com"],
+            audience="my-audience"
+        ))
+
+    with pytest.raises(ConfigurationError, match="non-empty strings"):
+        ApiClient(ApiClientOptions(
+            domains=[None],
+            audience="my-audience"
+        ))
+
+    with pytest.raises(ConfigurationError, match="non-empty strings"):
+        ApiClient(ApiClientOptions(
+            domains=["tenant.auth0.com", ""],
+            audience="my-audience"
+        ))
+
+
+@pytest.mark.asyncio
 async def test_mcd_resolve_allowed_domains_static_list():
     """Test _resolve_allowed_domains with static list."""
     api_client = ApiClient(ApiClientOptions(
@@ -3044,6 +3065,53 @@ async def test_mcd_resolve_allowed_domains_single_domain_mode():
 
 
 @pytest.mark.asyncio
+async def test_mcd_async_resolver_success():
+    """Test that async resolver functions are properly awaited."""
+    async def async_resolver(context):
+        return ["tenant1.auth0.com", "tenant2.auth0.com"]
+
+    api_client = ApiClient(ApiClientOptions(
+        domains=async_resolver,
+        audience="my-audience"
+    ))
+
+    result = await api_client._resolve_allowed_domains(
+        "https://tenant1.auth0.com/"
+    )
+    assert result == ["https://tenant1.auth0.com/", "https://tenant2.auth0.com/"]
+
+
+@pytest.mark.asyncio
+async def test_mcd_async_resolver_error():
+    """Test that errors from async resolvers are wrapped in DomainsResolverError."""
+    async def failing_resolver(context):
+        raise RuntimeError("database connection lost")
+
+    api_client = ApiClient(ApiClientOptions(
+        domains=failing_resolver,
+        audience="my-audience"
+    ))
+
+    with pytest.raises(DomainsResolverError, match="database connection lost"):
+        await api_client._resolve_allowed_domains("https://tenant1.auth0.com/")
+
+
+@pytest.mark.asyncio
+async def test_mcd_resolver_returns_non_string_items():
+    """Test that resolver returning non-string items raises DomainsResolverError."""
+    def bad_resolver(context):
+        return [123, None]
+
+    api_client = ApiClient(ApiClientOptions(
+        domains=bad_resolver,
+        audience="my-audience"
+    ))
+
+    with pytest.raises(DomainsResolverError, match="non-empty strings"):
+        await api_client._resolve_allowed_domains("https://tenant1.auth0.com/")
+
+
+@pytest.mark.asyncio
 async def test_mcd_verify_rejects_symmetric_algorithm():
     """Test that verify_access_token rejects tokens with symmetric algorithms (HS256)."""
     # Create a token with HS256 algorithm in header (without actually signing it)
@@ -3191,6 +3259,64 @@ async def test_mcd_first_issuer_validation(httpx_mock):
         await api_client.verify_access_token(token)
 
     assert "token issuer does not match the discovery issuer" in str(err.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_mcd_second_issuer_validation(httpx_mock):
+    """Test second issuer validation: verified claims iss must match discovery issuer exactly.
+
+    The first validation compares normalized issuers (case-insensitive, trailing slash).
+    The second validation (post-signature) compares raw strings. This catches subtle
+    mismatches that normalization hides — a defense-in-depth guard against token tampering.
+    """
+    # Generate token with MIXED CASE issuer — normalizes to same value as discovery
+    # but raw string differs from discovery's lowercase issuer
+    token = await generate_token(
+        domain="tenant1.auth0.com",
+        user_id="user123",
+        audience="my-audience",
+        issuer="https://Tenant1.Auth0.Com"  # Mixed case, no trailing slash
+    )
+
+    # Mock discovery returning LOWERCASE issuer (standard Auth0 format)
+    httpx_mock.add_response(
+        method="GET",
+        url="https://tenant1.auth0.com/.well-known/openid-configuration",
+        json={
+            "issuer": "https://tenant1.auth0.com/",  # Lowercase + trailing slash
+            "jwks_uri": "https://tenant1.auth0.com/.well-known/jwks.json"
+        }
+    )
+
+    # Mock JWKS (signature verification must pass for second check to be reached)
+    httpx_mock.add_response(
+        method="GET",
+        url="https://tenant1.auth0.com/.well-known/jwks.json",
+        json={
+            "keys": [
+                {
+                    "kty": "RSA",
+                    "kid": "TEST_KEY",
+                    "n": "whYOFK2Ocbbpb_zVypi9SeKiNUqKQH0zTKN1-6fpCTu6ZalGI82s7XK3tan4dJt90ptUPKD2zvxqTzFNfx4HHHsrYCf2-FMLn1VTJfQazA2BvJqAwcpW1bqRUEty8tS_Yv4hRvWfQPcc2Gc3-_fQOOW57zVy-rNoJc744kb30NjQxdGp03J2S3GLQu7oKtSDDPooQHD38PEMNnITf0pj-KgDPjymkMGoJlO3aKppsjfbt_AH6GGdRghYRLOUwQU-h-ofWHR3lbYiKtXPn5dN24kiHy61e3VAQ9_YAZlwXC_99GGtw_NpghFAuM4P1JDn0DppJldy3PGFC0GfBCZASw",
+                    "e": "AQAB",
+                    "alg": "RS256",
+                    "use": "sig"
+                }
+            ]
+        }
+    )
+
+    api_client = ApiClient(ApiClientOptions(
+        domains=["tenant1.auth0.com"],
+        audience="my-audience"
+    ))
+
+    # First validation passes (normalized forms match), but second validation
+    # fails because raw claims["iss"] != discovery_issuer
+    with pytest.raises(VerifyAccessTokenError) as err:
+        await api_client.verify_access_token(token)
+
+    assert "verified token issuer does not match the discovery issuer" in str(err.value).lower()
 
 
 @pytest.mark.asyncio
@@ -3782,19 +3908,97 @@ async def test_effective_ttl_from_cache_control(httpx_mock, max_age_header, conf
         cache_ttl_seconds=configured_ttl,
     ))
 
-    before = datetime.now()
+    before = time.monotonic()
     await api_client.verify_access_token(token)
 
     # Inspect discovery cache entry expiry
     discovery_key = "https://tenant1.auth0.com/"
     _, discovery_expiry = api_client._discovery_cache._cache[discovery_key]
-    discovery_ttl = (discovery_expiry - before).total_seconds()
+    discovery_ttl = discovery_expiry - before
     assert abs(discovery_ttl - expected_ttl) < 2
 
     # Inspect JWKS cache entry expiry
     jwks_key = "https://tenant1.auth0.com/.well-known/jwks.json"
     _, jwks_expiry = api_client._jwks_cache._cache[jwks_key]
-    jwks_ttl = (jwks_expiry - before).total_seconds()
+    jwks_ttl = jwks_expiry - before
     assert abs(jwks_ttl - expected_ttl) < 2
+
+
+# ===== MCD: verify_request() Integration =====
+
+
+@pytest.mark.asyncio
+async def test_mcd_verify_request_with_resolver_context(httpx_mock):
+    """Test that verify_request() forwards request_url and request_headers to the resolver.
+
+    This tests the actual user-facing API path: verify_request() → verify_access_token()
+    → _resolve_allowed_domains() with resolver context populated from verify_request args.
+    """
+    received_contexts = []
+
+    def capturing_resolver(context):
+        """Resolver that captures the context it receives."""
+        received_contexts.append(context)
+        return ["tenant1.auth0.com"]
+
+    token = await generate_token(
+        domain="tenant1.auth0.com",
+        user_id="user123",
+        audience="my-audience",
+        issuer="https://tenant1.auth0.com/"
+    )
+
+    # Mock discovery
+    httpx_mock.add_response(
+        method="GET",
+        url="https://tenant1.auth0.com/.well-known/openid-configuration",
+        json={
+            "issuer": "https://tenant1.auth0.com/",
+            "jwks_uri": "https://tenant1.auth0.com/.well-known/jwks.json"
+        }
+    )
+
+    # Mock JWKS
+    httpx_mock.add_response(
+        method="GET",
+        url="https://tenant1.auth0.com/.well-known/jwks.json",
+        json={
+            "keys": [
+                {
+                    "kty": "RSA",
+                    "kid": "TEST_KEY",
+                    "n": "whYOFK2Ocbbpb_zVypi9SeKiNUqKQH0zTKN1-6fpCTu6ZalGI82s7XK3tan4dJt90ptUPKD2zvxqTzFNfx4HHHsrYCf2-FMLn1VTJfQazA2BvJqAwcpW1bqRUEty8tS_Yv4hRvWfQPcc2Gc3-_fQOOW57zVy-rNoJc744kb30NjQxdGp03J2S3GLQu7oKtSDDPooQHD38PEMNnITf0pj-KgDPjymkMGoJlO3aKppsjfbt_AH6GGdRghYRLOUwQU-h-ofWHR3lbYiKtXPn5dN24kiHy61e3VAQ9_YAZlwXC_99GGtw_NpghFAuM4P1JDn0DppJldy3PGFC0GfBCZASw",
+                    "e": "AQAB",
+                    "alg": "RS256",
+                    "use": "sig"
+                }
+            ]
+        }
+    )
+
+    api_client = ApiClient(ApiClientOptions(
+        domains=capturing_resolver,
+        audience="my-audience"
+    ))
+
+    request_headers = {
+        "authorization": f"Bearer {token}",
+        "x-custom-header": "test-value"
+    }
+
+    claims = await api_client.verify_request(
+        headers=request_headers,
+        http_url="https://api.example.com/users"
+    )
+
+    assert claims["sub"] == "user123"
+
+    # Verify the resolver received the correct context
+    assert len(received_contexts) == 1
+    ctx = received_contexts[0]
+    assert ctx["request_url"] == "https://api.example.com/users"
+    assert ctx["request_headers"]["authorization"] == f"Bearer {token}"
+    assert ctx["request_headers"]["x-custom-header"] == "test-value"
+    assert ctx["unverified_iss"] == "https://tenant1.auth0.com/"
 
 

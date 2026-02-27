@@ -1,5 +1,5 @@
+import time
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta
 from typing import Any, Optional
 
 
@@ -74,8 +74,12 @@ class InMemoryCache(CacheAdapter):
     """
     Default in-memory cache implementation with LRU eviction.
 
+    Designed for asyncio (single-threaded).
+    For multi-threaded environments, implement a custom CacheAdapter
+    with appropriate locking.
+
     Features:
-    - TTL (time-to-live) support per entry
+    - TTL (time-to-live) support per entry using monotonic clock
     - LRU (Least Recently Used) eviction when max_entries reached
     - No external dependencies
 
@@ -96,7 +100,7 @@ class InMemoryCache(CacheAdapter):
         Args:
             max_entries: Maximum number of cache entries (default: 100)
         """
-        self._cache: dict[str, tuple[Any, Optional[datetime]]] = {}
+        self._cache: dict[str, tuple[Any, Optional[float]]] = {}
         self._max_entries = max_entries
 
     def get(self, key: str) -> Optional[Any]:
@@ -116,7 +120,7 @@ class InMemoryCache(CacheAdapter):
 
         value, expiry = self._cache[key]
 
-        if expiry and datetime.now() > expiry:
+        if expiry is not None and time.monotonic() > expiry:
             del self._cache[key]
             return None
 
@@ -145,8 +149,8 @@ class InMemoryCache(CacheAdapter):
             del self._cache[oldest_key]
 
         expiry = None
-        if ttl_seconds:
-            expiry = datetime.now() + timedelta(seconds=ttl_seconds)
+        if ttl_seconds is not None:
+            expiry = time.monotonic() + ttl_seconds
 
         self._cache[key] = (value, expiry)
 
