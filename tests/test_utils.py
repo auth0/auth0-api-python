@@ -65,7 +65,7 @@ def test_normalize_domain_custom_domain():
 def test_normalize_domain_multiple_slashes():
     """Test normalization with multiple trailing slashes."""
     assert normalize_domain("tenant.auth0.com///") == "https://tenant.auth0.com/"
-    
+
 
 def test_normalize_domain_rejects_path():
     """Test that domain with path segments is rejected."""
