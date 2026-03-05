@@ -17,7 +17,8 @@ This SDK provides comprehensive support for securing APIs with Auth0-issued acce
 
 ### **Core Features**
 - **Unified Entry Point**: `verify_request()` - automatically detects and validates Bearer or DPoP schemes
-- **OIDC Discovery** - Automatic fetching of Auth0 metadata and JWKS
+- **Multi-Custom Domain (MCD)** - Accept tokens from multiple Auth0 domains with static lists or dynamic resolvers
+- **OIDC Discovery** - Automatic fetching of Auth0 metadata and JWKS with per-issuer caching
 - **JWT Validation** - Complete RS256 signature verification with claim validation
 - **DPoP Proof Verification** - Full RFC 9449 compliance with ES256 signature validation
 - **Flexible Configuration** - Support for both "Allowed" and "Required" DPoP modes
@@ -278,6 +279,50 @@ api_client = ApiClient(ApiClientOptions(
     dpop_iat_offset=300,        # Maximum proof age (seconds)
 ))
 ```
+
+### 7. Multi-Custom Domain (MCD) Support
+
+If your Auth0 tenant has multiple custom domains, or you're migrating between domains, the SDK can accept tokens from any of them:
+
+#### Static Domain List
+
+```python
+from auth0_api_python import ApiClient, ApiClientOptions
+
+api_client = ApiClient(ApiClientOptions(
+    domains=[
+        "tenant.auth0.com",
+        "auth.example.com",
+        "auth.acme.org"
+    ],
+    audience="https://api.example.com"
+))
+
+# Tokens from any of the three domains are accepted
+claims = await api_client.verify_access_token(access_token)
+```
+
+#### Dynamic Resolver
+
+For runtime domain resolution based on request context:
+
+```python
+from auth0_api_python import ApiClient, ApiClientOptions, DomainsResolverContext
+
+def resolve_domains(context: DomainsResolverContext) -> list[str]:
+    # Determine allowed domains based on the request
+    return ["tenant.auth0.com", "auth.example.com"]
+
+api_client = ApiClient(ApiClientOptions(
+    domains=resolve_domains,
+    audience="https://api.example.com"
+))
+```
+
+For hybrid mode (migration scenarios), resolver patterns, error handling, and caching configuration, see the full guides:
+
+- **[Multi-Custom Domain Guide](docs/MultipleCustomDomain.md)** - Configuration modes, resolver patterns, migration, error handling
+- **[Caching Guide](docs/Caching.md)** - Cache tuning, custom adapters (Redis, Memcached)
 
 ## Feedback
 
