@@ -2905,6 +2905,76 @@ async def test_mcd_init_with_non_string_domains_list():
 
 
 @pytest.mark.asyncio
+async def test_mcd_init_client_id_requires_domain():
+    """Test that client_id requires domain to be set (needed for token endpoint operations)."""
+    with pytest.raises(ConfigurationError, match="'domain' parameter is required when 'client_id'"):
+        ApiClient(ApiClientOptions(
+            domains=["tenant.auth0.com"],
+            client_id="my-client",
+            client_secret="my-secret",
+            audience="my-audience"
+        ))
+
+    # Should work with both domain and domains
+    client = ApiClient(ApiClientOptions(
+        domain="tenant.auth0.com",
+        domains=["tenant.auth0.com", "custom.example.com"],
+        client_id="my-client",
+        client_secret="my-secret",
+        audience="my-audience"
+    ))
+    assert client.options.client_id == "my-client"
+
+    # Should work with domains only (no client_id)
+    client = ApiClient(ApiClientOptions(
+        domains=["tenant.auth0.com"],
+        audience="my-audience"
+    ))
+    assert client._allowed_domains is not None
+
+
+@pytest.mark.asyncio
+async def test_cache_config_validation():
+    """Test that cache_max_entries and cache_ttl_seconds are validated at init."""
+    with pytest.raises(ConfigurationError, match="cache_ttl_seconds must be a non-negative number"):
+        ApiClient(ApiClientOptions(
+            domain="tenant.auth0.com",
+            audience="my-audience",
+            cache_ttl_seconds=-1
+        ))
+
+    with pytest.raises(ConfigurationError, match="cache_max_entries must be an integer greater than 1"):
+        ApiClient(ApiClientOptions(
+            domain="tenant.auth0.com",
+            audience="my-audience",
+            cache_max_entries=0
+        ))
+
+    with pytest.raises(ConfigurationError, match="cache_max_entries must be an integer greater than 1"):
+        ApiClient(ApiClientOptions(
+            domain="tenant.auth0.com",
+            audience="my-audience",
+            cache_max_entries=1
+        ))
+
+    with pytest.raises(ConfigurationError, match="cache_max_entries must be an integer greater than 1"):
+        ApiClient(ApiClientOptions(
+            domain="tenant.auth0.com",
+            audience="my-audience",
+            cache_max_entries=-5
+        ))
+
+    # cache_ttl_seconds=0 is valid (always refetch), cache_max_entries=2 is minimum
+    client = ApiClient(ApiClientOptions(
+        domain="tenant.auth0.com",
+        audience="my-audience",
+        cache_ttl_seconds=0,
+        cache_max_entries=2
+    ))
+    assert client._cache_ttl == 0
+
+
+@pytest.mark.asyncio
 async def test_mcd_resolve_allowed_domains_static_list():
     """Test _resolve_allowed_domains with static list."""
     api_client = ApiClient(ApiClientOptions(
@@ -3108,6 +3178,21 @@ async def test_mcd_resolver_returns_non_string_items():
     ))
 
     with pytest.raises(DomainsResolverError, match="non-empty strings"):
+        await api_client._resolve_allowed_domains("https://tenant1.auth0.com/")
+
+
+@pytest.mark.asyncio
+async def test_mcd_resolver_returns_invalid_domain_format():
+    """Test that resolver returning domains with invalid format raises DomainsResolverError."""
+    def resolver_with_http(context):
+        return ["tenant1.auth0.com", "http://invalid.com"]
+
+    api_client = ApiClient(ApiClientOptions(
+        domains=resolver_with_http,
+        audience="my-audience"
+    ))
+
+    with pytest.raises(DomainsResolverError, match="Domains resolver returned invalid domain"):
         await api_client._resolve_allowed_domains("https://tenant1.auth0.com/")
 
 
@@ -3317,6 +3402,55 @@ async def test_mcd_second_issuer_validation(httpx_mock):
         await api_client.verify_access_token(token)
 
     assert "verified token issuer does not match the discovery issuer" in str(err.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_mcd_malformed_token_issuer_format(httpx_mock):
+    """Test that a token with malformed iss claim raises VerifyAccessTokenError."""
+    # Generate token with http:// issuer (rejected by normalize_domain)
+    token = await generate_token(
+        domain="evil.com",
+        user_id="user123",
+        audience="my-audience",
+        issuer="http://evil.com"
+    )
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="tenant1.auth0.com",
+        audience="my-audience"
+    ))
+
+    with pytest.raises(VerifyAccessTokenError, match="Invalid token issuer format"):
+        await api_client.verify_access_token(token)
+
+
+@pytest.mark.asyncio
+async def test_mcd_malformed_discovery_issuer_format(httpx_mock):
+    """Test that malformed issuer in discovery metadata raises VerifyAccessTokenError."""
+    token = await generate_token(
+        domain="tenant1.auth0.com",
+        user_id="user123",
+        audience="my-audience",
+        issuer="https://tenant1.auth0.com/"
+    )
+
+    # Mock discovery returning malformed issuer with http://
+    httpx_mock.add_response(
+        method="GET",
+        url="https://tenant1.auth0.com/.well-known/openid-configuration",
+        json={
+            "issuer": "http://tenant1.auth0.com/",
+            "jwks_uri": "https://tenant1.auth0.com/.well-known/jwks.json"
+        }
+    )
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="tenant1.auth0.com",
+        audience="my-audience"
+    ))
+
+    with pytest.raises(VerifyAccessTokenError, match="Invalid discovery issuer format"):
+        await api_client.verify_access_token(token)
 
 
 @pytest.mark.asyncio

@@ -88,7 +88,19 @@ class ApiClient:
                 "Use 'domain' for single-domain mode, 'domains' for multi-domain support."
             )
 
+        # Validate that domain is set when client_id is configured
+        if options.client_id and not options.domain:
+            raise ConfigurationError(
+                "The 'domain' parameter is required when 'client_id' is configured."
+            )
         self.options = options
+
+        # Validate cache configuration
+        if not isinstance(options.cache_ttl_seconds, (int, float)) or options.cache_ttl_seconds < 0:
+            raise ConfigurationError("cache_ttl_seconds must be a non-negative number")
+
+        if not isinstance(options.cache_max_entries, int) or options.cache_max_entries < 2:
+            raise ConfigurationError("cache_max_entries must be an integer greater than 1")
 
         if options.cache_adapter:
             self._discovery_cache = options.cache_adapter
@@ -177,7 +189,12 @@ class ApiClient:
                 )
 
             # Normalize domains from resolver
-            allowed_domains = [normalize_domain(d) for d in result]
+            try:
+                allowed_domains = [normalize_domain(d) for d in result]
+            except ValueError as e:
+                raise DomainsResolverError(
+                    f"Domains resolver returned invalid domain: {str(e)}"
+                ) from e
         else:
             # Should never happen due to __init__ validation
             raise ConfigurationError("Invalid _allowed_domains type")
@@ -432,7 +449,10 @@ class ApiClient:
             raise VerifyAccessTokenError("Token missing 'iss' claim")
 
         # Normalize issuer for validation
-        normalized_iss = normalize_domain(unverified_iss)
+        try:
+            normalized_iss = normalize_domain(unverified_iss)
+        except ValueError as e:
+            raise VerifyAccessTokenError(f"Invalid token issuer format: {str(e)}") from e
 
         # Validate issuer against allowed domains (MCD)
         if self._allowed_domains is not None:
@@ -461,7 +481,10 @@ class ApiClient:
             raise VerifyAccessTokenError("Discovery metadata missing 'issuer' field")
 
         # Normalize discovery issuer for comparison
-        normalized_discovery_issuer = normalize_domain(discovery_issuer)
+        try:
+            normalized_discovery_issuer = normalize_domain(discovery_issuer)
+        except ValueError as e:
+            raise VerifyAccessTokenError(f"Invalid discovery issuer format: {str(e)}") from e
 
         if normalized_iss != normalized_discovery_issuer:
             raise VerifyAccessTokenError(

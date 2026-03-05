@@ -110,6 +110,9 @@ claims = await api_client.verify_request(
 )
 ```
 
+> [!WARNING]
+> If using `Host` or `X-Forwarded-Host` headers in your resolver, do not trust them without validation — these headers can be spoofed by clients. Always validate against a known allowlist of your API hostnames, or use server-determined values from your reverse proxy / API gateway that are not client-controllable.
+
 ### Tenant Lookup
 
 Resolve domains from a database or configuration service:
@@ -126,7 +129,13 @@ def tenant_resolver(context: DomainsResolverContext) -> list[str]:
 ```
 
 > [!NOTE]
-> The resolver runs synchronously. If your lookup requires async I/O (database queries, HTTP calls), wrap it with `asyncio.run()` or pre-load the domain mapping at startup.
+> The resolver can be synchronous or asynchronous. If your resolver is an `async def`, the SDK will automatically `await` the result.
+>
+> ```python
+> async def async_resolver(context: DomainsResolverContext) -> list[str]:
+>     domains = await fetch_domains_from_db(context["unverified_iss"])
+>     return domains
+> ```
 
 ---
 
