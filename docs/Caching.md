@@ -73,7 +73,7 @@ api_client = ApiClient(ApiClientOptions(
 
 When a custom adapter is provided, both the discovery cache and JWKS cache use the same adapter instance. Cache keys are inherently distinct — discovery keys are normalized issuer URLs (e.g., `https://tenant.auth0.com/`) and JWKS keys are `jwks_uri` values (e.g., `https://tenant.auth0.com/.well-known/jwks.json`).
 
-**Note:** Because both caches share one adapter, entries share the same LRU eviction pool. A JWKS entry could evict a discovery entry (or vice versa) under memory pressure. Set `cache_max_entries` accordingly — recommended: `number_of_issuers × 3`. With the default `InMemoryCache`, discovery and JWKS caches are separate and each gets its own `max_entries` budget.
+**Note:** Because both caches share one adapter, entries share the same LRU eviction pool. A JWKS entry could evict a discovery entry (or vice versa) under memory pressure. Set `cache_max_entries` accordingly — recommended: `number_of_issuers × 2`. With the default `InMemoryCache`, discovery and JWKS caches are separate and each gets its own `max_entries` budget.
 
 ## Tuning Recommendations
 
