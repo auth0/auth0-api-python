@@ -15,7 +15,10 @@ python = "^3.9"
 authlib = "^1.0"      # For JWT/OIDC features
 requests = "^2.31.0"  # If you use requests for HTTP calls (e.g., discovery)
 httpx = "^0.28.1"
-ada-url = "^1.27.0"
+ada-url = [
+    {version = "^1.30.0", python = ">=3.10"},
+    {version = "^1.27.0", python = ">=3.9,<3.10"}
+]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"
