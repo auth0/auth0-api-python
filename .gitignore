@@ -26,3 +26,6 @@ coverage.xml
 
 # IDE
 .idea/
+
+# AI Tools
+.claude/
