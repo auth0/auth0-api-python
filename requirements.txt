@@ -1,6 +1,5 @@
 # This file is maintained manually for SCA scanning (.github/workflows/sca_scan.yml)
 # Source of truth for dependencies: pyproject.toml + poetry.lock
-# Future: Consider auto-generating via poetry export in CI
 
 authlib>=1.6.9
 httpx>=0.28.1
