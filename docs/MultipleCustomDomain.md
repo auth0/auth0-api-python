@@ -1,10 +1,12 @@
-# Multi-Custom Domain (MCD)
+# Multiple Custom Domains (MCD)
 
-Multi-Custom Domain support allows your API to accept tokens issued by multiple Auth0 domains. This is useful when:
+Multiple Custom Domains (MCD) support enables a single API application to accept access tokens issued by multiple domains associated with the same Auth0 tenant, including the canonical domain and its custom domains. This is commonly required in scenarios such as:
 
-- Your Auth0 tenant has multiple custom domains configured
-- You're migrating from one domain to another and need to accept tokens from both during the transition
-- Your API serves requests from clients using different Auth0 domains
+- Multi-brand applications (B2C) where each brand uses a different custom domain but they all share the same API
+- A single API serves multiple frontend applications that use different custom domains
+- A gradual migration from the canonical domain to a custom domain, where both domains need to be supported during the transition period
+
+In these cases, your API must trust and validate tokens from multiple issuers instead of a single domain. The SDK supports two approaches for configuring multiple allowed issuer domains:
 
 ## Configuration Modes
 
@@ -32,7 +34,7 @@ The SDK validates the token's issuer against the configured list before performi
 
 ### Dynamic Resolver
 
-For APIs that need to determine allowed domains at runtime (e.g., based on the request):
+Use a dynamic resolver when the set of allowed issuer domains needs to be determined at runtime based on the incoming request. The SDK provides a `DomainsResolverContext` containing request and token-derived information (`request_url`, `request_headers`, and `unverified_iss`). You can use any combination of these inputs to determine the allowed issuer domains for the request.
 
 ```python
 from auth0_api_python import ApiClient, ApiClientOptions, DomainsResolverContext
@@ -53,6 +55,9 @@ claims = await api_client.verify_access_token(access_token)
 ```
 
 The resolver is called on every token verification. It receives a `DomainsResolverContext` with the unverified issuer and (if available) the request URL and headers. It must return a non-empty list of allowed domain strings.
+
+> [!NOTE]
+> `request_url` is optional for bearer token verification. When provided, the SDK passes it to the resolver as `context["request_url"]`. If omitted, `context["request_url"]` will be `None`. If your resolver needs the request URL, make sure you pass `http_url` to `verify_request()`.
 
 ### Hybrid Mode (domain + domains)
 
@@ -110,9 +115,6 @@ claims = await api_client.verify_request(
 )
 ```
 
-> [!WARNING]
-> If using `Host` or `X-Forwarded-Host` headers in your resolver, do not trust them without validation — these headers can be spoofed by clients. Always validate against a known allowlist of your API hostnames, or use server-determined values from your reverse proxy / API gateway that are not client-controllable.
-
 ### Tenant Lookup
 
 Resolve domains from a database or configuration service:
@@ -136,6 +138,26 @@ def tenant_resolver(context: DomainsResolverContext) -> list[str]:
 >     domains = await fetch_domains_from_db(context["unverified_iss"])
 >     return domains
 > ```
+
+---
+
+## Security Requirements
+
+When configuring `domains` or a domain resolver for Multiple Custom Domains, you are responsible for ensuring that only trusted issuer domains are returned. Mis-configuring the domain resolver is a critical security risk. It can cause the SDK to:
+
+- Accept access tokens from unintended issuers
+- Make discovery or JWKS requests to unintended domains
+
+**Single Tenant Limitation:** The `domains` configuration is intended only for multiple custom domains that belong to the same Auth0 tenant. It is not a supported mechanism for connecting multiple Auth0 tenants to a single API.
+
+**Request-Derived Input Warning:** If your resolver uses request-derived values such as `context["request_url"]`, `context["request_headers"]`, or `context["unverified_iss"]`, do not trust those values directly. Use them only to map known and expected request values to a fixed allowlist of issuer domains that you control.
+
+In particular:
+
+- `context["request_url"]` and `context["request_headers"]` may be influenced by clients, proxies, or load balancers, depending on your framework and deployment setup
+- `context["unverified_iss"]` comes from the token before signature verification and must not be trusted by itself
+
+If your deployment relies on reverse proxies or load balancers, ensure that host-related request information is treated as trusted only when it comes from trusted infrastructure. Misconfigured proxy handling can cause the SDK to trust unintended issuer domains.
 
 ---
 

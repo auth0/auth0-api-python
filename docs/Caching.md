@@ -91,6 +91,8 @@ Each issuer domain consumes **2 cache entries** (one for discovery metadata, one
 
 When the cache is full, the least recently used entry is evicted. A cache miss triggers a network fetch on the next verification for that issuer.
 
+**Rule of thumb:** Set `cache_max_entries` to cover the number of distinct issuers a single process is expected to use during the TTL window, with some headroom.
+
 ## CacheAdapter API
 
 | Method | Signature | Description |
