@@ -1,5 +1,11 @@
 # Change Log
 
+## [1.0.0.b7](https://github.com/auth0/auth0-api-python/tree/1.0.0b7) (2026-04-02)
+[Full Changelog](https://github.com/auth0/auth0-api-python/compare/1.0.0b6...1.0.0b7)
+
+**Changed**
+- chore: bump ada-url for Python 3.14, update deps, and fix CI [\#73](https://github.com/auth0/auth0-api-python/pull/73) ([kishore7snehil](https://github.com/kishore7snehil))
+
 ## [1.0.0.b6](https://github.com/auth0/auth0-api-python/tree/1.0.0b6) (2025-10-29)
 [Full Changelog](https://github.com/auth0/auth0-api-python/compare/1.0.0b5...1.0.0b6)
 
