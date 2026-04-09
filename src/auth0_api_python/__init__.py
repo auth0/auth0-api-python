@@ -6,12 +6,25 @@ in server-side APIs, using Authlib for OIDC discovery and JWKS fetching.
 """
 
 from .api_client import ApiClient
+from .cache import CacheAdapter, InMemoryCache
 from .config import ApiClientOptions
-from .errors import ApiError, GetTokenByExchangeProfileError
+from .errors import (
+    ApiError,
+    ConfigurationError,
+    DomainsResolverError,
+    GetTokenByExchangeProfileError,
+)
+from .types import DomainsResolver, DomainsResolverContext
 
 __all__ = [
     "ApiClient",
     "ApiClientOptions",
     "ApiError",
-    "GetTokenByExchangeProfileError"
+    "CacheAdapter",
+    "ConfigurationError",
+    "DomainsResolver",
+    "DomainsResolverContext",
+    "DomainsResolverError",
+    "GetTokenByExchangeProfileError",
+    "InMemoryCache",
 ]

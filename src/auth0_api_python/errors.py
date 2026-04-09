@@ -140,3 +140,23 @@ class ApiError(BaseAuthError):
 
     def get_error_code(self) -> str:
         return self.code
+
+
+class ConfigurationError(BaseAuthError):
+    """Error raised when SDK configuration is invalid."""
+
+    def get_status_code(self) -> int:
+        return 500
+
+    def get_error_code(self) -> str:
+        return "invalid_configuration"
+
+
+class DomainsResolverError(BaseAuthError):
+    """Error raised when domains resolver function fails."""
+
+    def get_status_code(self) -> int:
+        return 500
+
+    def get_error_code(self) -> str:
+        return "domains_resolver_error"

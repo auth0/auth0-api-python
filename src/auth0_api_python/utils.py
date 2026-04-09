@@ -7,57 +7,147 @@ import base64
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from typing import Any, Callable, Optional, Union
 
 import httpx
 from ada_url import URL
 
 
+def parse_cache_control_max_age(headers: Mapping[str, str]) -> Optional[int]:
+    """
+    Parse the max-age directive from a Cache-Control HTTP header.
+
+    Args:
+        headers: HTTP response headers (dict-like, supports case-insensitive
+                 access for httpx Headers objects)
+
+    Returns:
+        max-age value in seconds, or None if not present or unparseable
+    """
+    cache_control = headers.get("cache-control") or headers.get("Cache-Control")
+    if not cache_control:
+        return None
+
+    for directive in cache_control.split(","):
+        directive = directive.strip().lower()
+        if directive.startswith("max-age="):
+            try:
+                value = int(directive[8:].strip())
+                return value if value >= 0 else None
+            except ValueError:
+                return None
+
+    return None
+
+
+def normalize_domain(domain: str) -> str:
+    """
+    Normalize a domain string to a standard issuer URL format.
+
+    Args:
+        domain: Domain string in any format (e.g., "tenant.auth0.com",
+                "https://tenant.auth0.com/", "TENANT.AUTH0.COM")
+
+    Returns:
+        Normalized issuer URL (e.g., "https://tenant.auth0.com/")
+
+    """
+    if not isinstance(domain, str) or not domain.strip():
+        raise ValueError("domain must be a non-empty string")
+
+    domain = domain.strip().lower()
+
+    # Reject http:// explicitly
+    if domain.startswith('http://'):
+        raise ValueError("invalid domain URL (https required)")
+
+    # Strip https:// prefix
+    domain = domain.replace('https://', '')
+
+    # Split host from any path/query/fragment
+    host = domain.split('/')[0].split('?')[0].split('#')[0]
+
+    # Reject credentials
+    if '@' in host:
+        raise ValueError("invalid domain URL (credentials are not allowed)")
+
+    # Check for path segments, query, or fragment
+    bare = domain.rstrip('/')
+    if bare != host:
+        raise ValueError(
+            "invalid domain URL (path/query/fragment are not allowed)"
+        )
+
+    return f"https://{host}/"
+
+
 async def fetch_oidc_metadata(
     domain: str,
     custom_fetch: Optional[Callable[..., Any]] = None
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], Optional[int]]:
     """
     Asynchronously fetch the OIDC config from https://{domain}/.well-known/openid-configuration.
-    Returns a dict with keys like issuer, jwks_uri, authorization_endpoint, etc.
-    If custom_fetch is provided, we call it instead of httpx.
+
+    Returns:
+        Tuple of (metadata_dict, max_age_or_none). max_age is parsed from
+        the Cache-Control response header if present.
     """
     url = f"https://{domain}/.well-known/openid-configuration"
     if custom_fetch:
         response = await custom_fetch(url)
-        return response.json() if hasattr(response, "json") else response
+        if hasattr(response, "json"):
+            data = response.json()
+            max_age = parse_cache_control_max_age(response.headers) if hasattr(response, "headers") else None
+            return data, max_age
+        return response, None
     else:
         async with httpx.AsyncClient() as client:
             resp = await client.get(url)
             resp.raise_for_status()
-            return resp.json()
+            max_age = parse_cache_control_max_age(resp.headers)
+            return resp.json(), max_age
 
 
 async def fetch_jwks(
     jwks_uri: str,
     custom_fetch: Optional[Callable[..., Any]] = None
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], Optional[int]]:
     """
     Asynchronously fetch the JSON Web Key Set from jwks_uri.
-    Returns the raw JWKS JSON, e.g. {'keys': [...]}
 
-    If custom_fetch is provided, it must be an async callable
-    that fetches data from the jwks_uri.
+    Returns:
+        Tuple of (jwks_dict, max_age_or_none). max_age is parsed from
+        the Cache-Control response header if present.
     """
     if custom_fetch:
         response = await custom_fetch(jwks_uri)
-        return response.json() if hasattr(response, "json") else response
+        if hasattr(response, "json"):
+            data = response.json()
+            max_age = parse_cache_control_max_age(response.headers) if hasattr(response, "headers") else None
+            return data, max_age
+        return response, None
     else:
         async with httpx.AsyncClient() as client:
             resp = await client.get(jwks_uri)
             resp.raise_for_status()
-            return resp.json()
+            max_age = parse_cache_control_max_age(resp.headers)
+            return resp.json(), max_age
 
 
-def get_unverified_header(token: Union[str, bytes]) -> dict:
+def _decode_jwt_segment(token: Union[str, bytes], segment_index: int) -> dict:
     """
-    Parse the first segment (header) of a JWT without verifying signature.
-    Ensures correct Base64 padding before decode to avoid garbage bytes.
+    Decode a specific segment from a JWT without verifying signature.
+
+    Args:
+        token: The JWT token (string or bytes)
+        segment_index: 0 for header, 1 for payload
+
+    Returns:
+        Decoded segment as dictionary
+
+    Raises:
+        ValueError: If token format is invalid
     """
     if isinstance(token, bytes):
         token = token.decode("utf-8")
@@ -66,12 +156,38 @@ def get_unverified_header(token: Union[str, bytes]) -> dict:
     if len(parts) != 3:
         raise ValueError(f"Invalid token format: expected 3 segments, got {len(parts)}")
 
-    header_b64 = parts[0]
-    header_b64 = remove_bytes_prefix(header_b64)
-    header_b64 = fix_base64_padding(header_b64)
+    segment_b64 = parts[segment_index]
+    segment_b64 = remove_bytes_prefix(segment_b64)
+    segment_b64 = fix_base64_padding(segment_b64)
 
-    header_data = base64.urlsafe_b64decode(header_b64)
-    return json.loads(header_data)
+    segment_data = base64.urlsafe_b64decode(segment_b64)
+    return json.loads(segment_data)
+
+
+def get_unverified_header(token: Union[str, bytes]) -> dict:
+    """
+    Parse the JWT header without verifying signature.
+
+    Args:
+        token: The JWT token
+
+    Returns:
+        Decoded header as dictionary
+    """
+    return _decode_jwt_segment(token, 0)
+
+
+def get_unverified_payload(token: Union[str, bytes]) -> dict:
+    """
+    Parse the JWT payload without verifying signature.
+
+    Args:
+        token: The JWT token
+
+    Returns:
+        Decoded payload (claims) as dictionary
+    """
+    return _decode_jwt_segment(token, 1)
 
 
 
