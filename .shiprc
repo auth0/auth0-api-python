@@ -1,7 +1,6 @@
 {
   "files": {
-    ".version": [],
-    "pyproject.toml": ["version = \"{MAJOR}.{MINOR}.{PATCH}{PRERELEASE_LABEL}{PRERELEASE_COUNTER}\""]
+    ".version": []
   },
   "prefixVersion": false
 }
