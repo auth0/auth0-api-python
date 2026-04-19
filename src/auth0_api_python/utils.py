@@ -14,24 +14,6 @@ from typing import Any, Callable, Optional, Union
 import httpx
 from ada_url import URL
 
-# ---------------------------------------------------------------------------
-# Shared, lazily-initialized httpx.AsyncClient used by `fetch_jwks` and
-# `fetch_oidc_metadata` whenever the caller has NOT supplied a `custom_fetch`.
-#
-# Why this exists:
-#   The previous implementation constructed `httpx.AsyncClient()` per call.
-#   That meant:
-#     1. A fresh TCP + TLS handshake to Auth0 on every cache miss (no
-#        connection pooling / keep-alive across calls).
-#     2. httpx's default 5-second connect/read/write/pool timeouts applied.
-#   Under any non-trivial concurrency — for example, when the in-memory
-#   JWKS cache expires while N requests are in flight — both effects cause
-#   `httpx.ConnectTimeout` errors that propagate out of `verify_request`
-#   and surface to callers as opaque "Unknown auth error" failures.
-#
-# A single long-lived client gives us connection pooling, explicit timeouts,
-# and bounded transport-level retries.
-# ---------------------------------------------------------------------------
 _DEFAULT_HTTPX_CLIENT: Optional[httpx.AsyncClient] = None
 _DEFAULT_HTTPX_CLIENT_LOCK = asyncio.Lock()
 
@@ -60,11 +42,7 @@ async def _get_default_httpx_client() -> httpx.AsyncClient:
 
 
 async def aclose_default_httpx_client() -> None:
-    """Close the module-level shared httpx client.
-
-    Useful for tests and for callers that want a clean shutdown. Safe to call
-    multiple times; safe to call when the client was never created.
-    """
+    """Close the module-level shared httpx client. Idempotent."""
     global _DEFAULT_HTTPX_CLIENT
     if _DEFAULT_HTTPX_CLIENT is not None and not _DEFAULT_HTTPX_CLIENT.is_closed:
         await _DEFAULT_HTTPX_CLIENT.aclose()

@@ -128,11 +128,7 @@ class ApiClient:
         self._dpop_jwt = JsonWebToken(self._dpop_algorithms)
 
     async def aclose(self) -> None:
-        """Release the shared default httpx client used for JWKS / OIDC fetches.
-
-        Only meaningful when no `custom_fetch` was supplied. Safe to call
-        multiple times; safe to call when the client was never created.
-        """
+        """Release the shared default httpx client. Idempotent; no-op when a `custom_fetch` is in use."""
         await aclose_default_httpx_client()
 
     def is_dpop_required(self) -> bool:
