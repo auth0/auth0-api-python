@@ -3,6 +3,7 @@ Utility functions for OIDC discovery and JWKS fetching (asynchronously)
 using httpx or a custom fetch approach.
 """
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -12,6 +13,40 @@ from typing import Any, Callable, Optional, Union
 
 import httpx
 from ada_url import URL
+
+_DEFAULT_HTTPX_CLIENT: Optional[httpx.AsyncClient] = None
+_DEFAULT_HTTPX_CLIENT_LOCK = asyncio.Lock()
+
+
+def _build_default_httpx_client() -> httpx.AsyncClient:
+    """Construct the default shared client used when no `custom_fetch` is set."""
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
+        limits=httpx.Limits(
+            max_connections=200,
+            max_keepalive_connections=50,
+        ),
+        transport=httpx.AsyncHTTPTransport(retries=2),
+    )
+
+
+async def _get_default_httpx_client() -> httpx.AsyncClient:
+    """Return the shared default client, creating it on first use."""
+    global _DEFAULT_HTTPX_CLIENT
+    if _DEFAULT_HTTPX_CLIENT is not None and not _DEFAULT_HTTPX_CLIENT.is_closed:
+        return _DEFAULT_HTTPX_CLIENT
+    async with _DEFAULT_HTTPX_CLIENT_LOCK:
+        if _DEFAULT_HTTPX_CLIENT is None or _DEFAULT_HTTPX_CLIENT.is_closed:
+            _DEFAULT_HTTPX_CLIENT = _build_default_httpx_client()
+        return _DEFAULT_HTTPX_CLIENT
+
+
+async def aclose_default_httpx_client() -> None:
+    """Close the module-level shared httpx client. Idempotent."""
+    global _DEFAULT_HTTPX_CLIENT
+    if _DEFAULT_HTTPX_CLIENT is not None and not _DEFAULT_HTTPX_CLIENT.is_closed:
+        await _DEFAULT_HTTPX_CLIENT.aclose()
+    _DEFAULT_HTTPX_CLIENT = None
 
 
 def parse_cache_control_max_age(headers: Mapping[str, str]) -> Optional[int]:
@@ -102,11 +137,11 @@ async def fetch_oidc_metadata(
             return data, max_age
         return response, None
     else:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            max_age = parse_cache_control_max_age(resp.headers)
-            return resp.json(), max_age
+        client = await _get_default_httpx_client()
+        resp = await client.get(url)
+        resp.raise_for_status()
+        max_age = parse_cache_control_max_age(resp.headers)
+        return resp.json(), max_age
 
 
 async def fetch_jwks(
@@ -128,11 +163,11 @@ async def fetch_jwks(
             return data, max_age
         return response, None
     else:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(jwks_uri)
-            resp.raise_for_status()
-            max_age = parse_cache_control_max_age(resp.headers)
-            return resp.json(), max_age
+        client = await _get_default_httpx_client()
+        resp = await client.get(jwks_uri)
+        resp.raise_for_status()
+        max_age = parse_cache_control_max_age(resp.headers)
+        return resp.json(), max_age
 
 
 def _decode_jwt_segment(token: Union[str, bytes], segment_index: int) -> dict:

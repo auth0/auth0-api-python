@@ -1,5 +1,6 @@
 import asyncio
 import time
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional, Union
 
@@ -22,6 +23,7 @@ from .errors import (
     VerifyAccessTokenError,
 )
 from .utils import (
+    aclose_default_httpx_client,
     calculate_jwk_thumbprint,
     fetch_jwks,
     fetch_oidc_metadata,
@@ -111,10 +113,23 @@ class ApiClient:
 
         self._cache_ttl = options.cache_ttl_seconds
 
+        # Per-cache-key single-flight locks for OIDC discovery and JWKS
+        # refetches. Without these, every concurrent request that misses the
+        # cache at the moment of TTL expiry fires its own outbound HTTP call
+        # — a thundering herd that Auth0 rate-limits and we time out on.
+        # The lock guarantees only ONE coroutine per cache key refetches;
+        # the rest await the result and read from the now-warm cache.
+        self._discovery_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._jwks_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
         self._jwt = JsonWebToken(["RS256"])
 
         self._dpop_algorithms = ["ES256"]
         self._dpop_jwt = JsonWebToken(self._dpop_algorithms)
+
+    async def aclose(self) -> None:
+        """Release the shared default httpx client. Idempotent; no-op when a `custom_fetch` is in use."""
+        await aclose_default_httpx_client()
 
     def is_dpop_required(self) -> bool:
         """Check if DPoP authentication is required."""
@@ -1029,19 +1044,26 @@ class ApiClient:
         if cached:
             return cached
 
-        metadata, max_age = await fetch_oidc_metadata(
-            domain=domain,
-            custom_fetch=self.options.custom_fetch
-        )
+        # Single-flight: only one coroutine per cache_key refetches; the
+        # rest await it and re-check the cache after acquiring the lock.
+        async with self._discovery_locks[cache_key]:
+            cached = self._discovery_cache.get(cache_key)
+            if cached:
+                return cached
 
-        effective_ttl = self._cache_ttl
-        if max_age is not None and self._cache_ttl is not None:
-            effective_ttl = min(max_age, self._cache_ttl)
-        elif max_age is not None:
-            effective_ttl = max_age
+            metadata, max_age = await fetch_oidc_metadata(
+                domain=domain,
+                custom_fetch=self.options.custom_fetch
+            )
 
-        self._discovery_cache.set(cache_key, metadata, ttl_seconds=effective_ttl)
-        return metadata
+            effective_ttl = self._cache_ttl
+            if max_age is not None and self._cache_ttl is not None:
+                effective_ttl = min(max_age, self._cache_ttl)
+            elif max_age is not None:
+                effective_ttl = max_age
+
+            self._discovery_cache.set(cache_key, metadata, ttl_seconds=effective_ttl)
+            return metadata
 
     async def _fetch_jwks(self, jwks_uri: str) -> dict[str, Any]:
         """
@@ -1060,19 +1082,26 @@ class ApiClient:
         if cached:
             return cached
 
-        jwks_data, max_age = await fetch_jwks(
-            jwks_uri=jwks_uri,
-            custom_fetch=self.options.custom_fetch
-        )
+        # Single-flight: only one coroutine per cache_key refetches; the
+        # rest await it and re-check the cache after acquiring the lock.
+        async with self._jwks_locks[cache_key]:
+            cached = self._jwks_cache.get(cache_key)
+            if cached:
+                return cached
 
-        effective_ttl = self._cache_ttl
-        if max_age is not None and self._cache_ttl is not None:
-            effective_ttl = min(max_age, self._cache_ttl)
-        elif max_age is not None:
-            effective_ttl = max_age
+            jwks_data, max_age = await fetch_jwks(
+                jwks_uri=jwks_uri,
+                custom_fetch=self.options.custom_fetch
+            )
 
-        self._jwks_cache.set(cache_key, jwks_data, ttl_seconds=effective_ttl)
-        return jwks_data
+            effective_ttl = self._cache_ttl
+            if max_age is not None and self._cache_ttl is not None:
+                effective_ttl = min(max_age, self._cache_ttl)
+            elif max_age is not None:
+                effective_ttl = max_age
+
+            self._jwks_cache.set(cache_key, jwks_data, ttl_seconds=effective_ttl)
+            return jwks_data
 
     def _validate_claims_presence(
         self,
