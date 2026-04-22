@@ -2,6 +2,121 @@
 
 This document provides examples for using the `auth0-api-python` package to validate Auth0 tokens in your API.
 
+## On Behalf Of Token Exchange
+
+Use `get_token_on_behalf_of()` when your API receives an `Auth0` access token for itself and needs
+to exchange it for another `Auth0` access token targeting a downstream API while preserving the same
+user identity. This is especially useful for `MCP` servers and other intermediary APIs that need to
+call downstream APIs on behalf of the user.
+
+The following example verifies the incoming access token for your API, exchanges it for a token for the downstream API, and then calls the downstream API with the exchanged token.
+
+```python
+import asyncio
+import httpx
+
+from auth0_api_python import ApiClient, ApiClientOptions
+
+async def exchange_on_behalf_of():
+    api_client = ApiClient(ApiClientOptions(
+        domain="your-tenant.auth0.com",
+        audience="https://mcp-server.example.com",
+        client_id="<AUTH0_CLIENT_ID>",
+        client_secret="<AUTH0_CLIENT_SECRET>"
+    ))
+
+    incoming_access_token = "incoming-auth0-access-token"
+
+    claims = await api_client.verify_access_token(access_token=incoming_access_token)
+
+    result = await api_client.get_token_on_behalf_of(
+        access_token=incoming_access_token,
+        audience="https://calendar-api.example.com",
+        scope="calendar:read calendar:write"
+    )
+
+    async with httpx.AsyncClient() as client:
+        downstream_response = await client.get(
+            "https://calendar-api.example.com/events",
+            headers={"Authorization": f"Bearer {result['access_token']}"}
+        )
+
+    downstream_response.raise_for_status()
+
+    return {
+        "user": claims["sub"],
+        "data": downstream_response.json(),
+    }
+
+asyncio.run(exchange_on_behalf_of())
+```
+
+> [!TIP] Production notes:
+> - Pass the raw access token to `get_token_on_behalf_of()`. Do not pass the full `Authorization` header or include the `Bearer ` prefix.
+> - Verify the incoming token for your API before exchanging it so your application rejects invalid or mis-targeted tokens early.
+> - The downstream `audience` must match an API identifier configured in your Auth0 tenant.
+> - `get_token_on_behalf_of()` only returns access-token-oriented fields. It does not expose `id_token` or `refresh_token`.
+
+In the current implementation, `get_token_on_behalf_of()` forwards the incoming access token as
+the [RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693#section-2.1) `subject_token` and relies on Auth0 to handle any DPoP-specific behavior for that token.
+
+## Inspecting Delegation After Token Verification
+
+When a downstream API or `MCP` server receives an access token that may have been issued through
+delegation, it can verify the token first and then inspect the `act` claim to identify the current
+actor for authorization and the full delegation chain for audit or attribution.
+
+```python
+import asyncio
+import logging
+
+from auth0_api_python import (
+    ApiClient,
+    ApiClientOptions,
+    get_current_actor,
+    get_delegation_chain,
+)
+
+logger = logging.getLogger(__name__)
+
+async def inspect_delegated_token():
+    api_client = ApiClient(ApiClientOptions(
+        domain="your-tenant.auth0.com",
+        audience="https://calendar-api.example.com"
+    ))
+
+    access_token = "delegated-auth0-access-token"
+
+    claims = await api_client.verify_access_token(access_token=access_token)
+
+    current_actor = get_current_actor(claims)
+    delegation_chain = get_delegation_chain(claims)
+
+    if current_actor != "mcp_server_client_id":
+        raise PermissionError("unexpected actor")
+
+    logger.info(
+        "delegated request",
+        extra={
+            "user_sub": claims["sub"],
+            "current_actor": current_actor,
+            "delegation_chain": delegation_chain,
+        },
+    )
+
+    return {
+        "user_sub": claims["sub"],
+        "current_actor": current_actor,
+        "delegation_chain": delegation_chain,
+    }
+
+asyncio.run(inspect_delegated_token())
+```
+
+Only the outermost `act.sub` represents the current actor and should be used for authorization
+decisions. Nested `act` values represent prior actors and are better suited for logging, audit, or
+attribution.
+
 ## Bearer Authentication
 
 Bearer authentication is the standard OAuth 2.0 token authentication method.
