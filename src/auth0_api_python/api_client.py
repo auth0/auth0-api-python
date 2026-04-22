@@ -21,6 +21,7 @@ from .errors import (
     MissingRequiredArgumentError,
     VerifyAccessTokenError,
 )
+from .types import OnBehalfOfTokenResult
 from .utils import (
     calculate_jwk_thumbprint,
     fetch_jwks,
@@ -34,6 +35,7 @@ from .utils import (
 
 # Token Exchange constants
 TOKEN_EXCHANGE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:token-exchange"  # noqa: S105
+OBO_ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"  # noqa: S105
 MAX_ARRAY_VALUES_PER_KEY = 20  # DoS protection for extra parameter arrays
 
 # OAuth parameter denylist - parameters that cannot be overridden via extras
@@ -232,7 +234,7 @@ class ApiClient:
             http_url: The HTTP URL (required for DPoP, also used for MCD resolver context)
 
         Returns:
-            The decoded access token claims
+            The decoded access token claims, including `act` when present.
 
         Raises:
             MissingRequiredArgumentError: If required args are missing
@@ -412,7 +414,7 @@ class ApiClient:
             required_claims: Optional list of additional claim names that must be present
 
         Returns:
-            The decoded token claims if valid.
+            The decoded token claims if valid, including `act` when present.
 
         Raises:
             MissingRequiredArgumentError: If no token is provided.
@@ -794,7 +796,7 @@ class ApiClient:
             Dictionary containing:
             - access_token (str): The Auth0 access token
             - expires_in (int): Token lifetime in seconds
-            - expires_at (int): Unix timestamp when token expires
+            - expires_at (int): Absolute expiration time as a Unix timestamp in seconds, calculated by the SDK from expires_in
             - id_token (str, optional): OpenID Connect ID token
             - refresh_token (str, optional): Refresh token
             - scope (str, optional): Granted scopes
@@ -961,6 +963,64 @@ class ApiClient:
                 502,
                 exc
             )
+
+    async def get_token_on_behalf_of(
+        self,
+        access_token: str,
+        audience: str,
+        scope: Optional[str] = None,
+    ) -> OnBehalfOfTokenResult:
+        """
+        Exchange an Auth0 access token for another Auth0 access token targeting a downstream API
+        while acting on behalf of the same end user (OBO).
+
+        This is a convenience wrapper around get_token_by_exchange_profile() that fixes the
+        RFC 8693 token types for Auth0 access-token-to-access-token exchange.
+
+        Args:
+            access_token: The Auth0 access token to exchange
+            audience: Target API identifier for the exchanged access token
+            scope: Optional space-separated OAuth 2.0 scopes to request
+
+        Returns:
+            Dictionary containing:
+            - access_token (str): The exchanged Auth0 access token
+            - expires_in (int): Token lifetime in seconds
+            - expires_at (int): Absolute expiration time as a Unix timestamp in seconds, calculated by the SDK from expires_in
+            - scope (str, optional): Granted scopes
+            - token_type (str, optional): Token type (typically "Bearer")
+            - issued_token_type (str, optional): RFC 8693 issued token type identifier
+
+        Raises:
+            MissingRequiredArgumentError: If required parameters are missing
+            GetTokenByExchangeProfileError: If client credentials are not configured or validation fails
+            ApiError: If the token endpoint returns an error
+        """
+        if not audience:
+            raise MissingRequiredArgumentError("audience")
+
+        result = await self.get_token_by_exchange_profile(
+            subject_token=access_token,
+            subject_token_type=OBO_ACCESS_TOKEN_TYPE,
+            audience=audience,
+            scope=scope,
+            requested_token_type=OBO_ACCESS_TOKEN_TYPE,
+        )
+
+        obo_result: OnBehalfOfTokenResult = {
+            "access_token": result["access_token"],
+            "expires_in": result["expires_in"],
+            "expires_at": result["expires_at"],
+        }
+
+        if "scope" in result:
+            obo_result["scope"] = result["scope"]
+        if "token_type" in result:
+            obo_result["token_type"] = result["token_type"]
+        if "issued_token_type" in result:
+            obo_result["issued_token_type"] = result["issued_token_type"]
+
+        return obo_result
 
     # ===== Private Methods =====
 

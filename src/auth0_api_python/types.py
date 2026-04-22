@@ -6,6 +6,19 @@ from collections.abc import Awaitable, Callable
 from typing import Optional, TypedDict, Union
 
 
+class ActClaim(TypedDict, total=False):
+    """
+    Actor claim carried by access tokens issued through delegation.
+
+    Attributes:
+        sub: The current actor for this step of the delegation chain.
+        act: The prior actor in the delegation chain, if present.
+    """
+
+    sub: str
+    act: "ActClaim"
+
+
 class DomainsResolverContext(TypedDict, total=False):
     """
     Context passed to domains resolver functions.
@@ -18,6 +31,27 @@ class DomainsResolverContext(TypedDict, total=False):
     request_url: Optional[str]
     request_headers: Optional[dict]
     unverified_iss: str
+
+
+class OnBehalfOfTokenResult(TypedDict, total=False):
+    """
+    Result returned from an On Behalf Of token exchange.
+
+    Attributes:
+        access_token: The access token issued for the downstream API.
+        expires_in: Token lifetime in seconds.
+        expires_at: Absolute expiration time as a Unix timestamp in seconds, calculated by the SDK from expires_in.
+        scope: Granted scopes, if returned by Auth0.
+        token_type: Token type, if returned by Auth0.
+        issued_token_type: RFC 8693 issued token type, if returned by Auth0.
+    """
+
+    access_token: str
+    expires_in: int
+    expires_at: int
+    scope: str
+    token_type: str
+    issued_token_type: str
 
 DomainsResolver = Callable[
     [DomainsResolverContext], Union[list[str], Awaitable[list[str]]]

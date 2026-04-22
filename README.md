@@ -212,6 +212,92 @@ except ApiError as e:
 
 More info: https://auth0.com/docs/authenticate/custom-token-exchange
 
+#### On Behalf Of Token Exchange
+
+Use `get_token_on_behalf_of()` when your API receives an `Auth0` access token for itself and needs
+to exchange it for another `Auth0` access token targeting a downstream API while preserving the
+same user identity. This is especially useful for `MCP` servers and other intermediary APIs that
+need to call downstream APIs on behalf of the user.
+
+The following example verifies the incoming access token for your API, exchanges it for a token for the downstream API, and then calls the downstream API with the exchanged token.
+
+```python
+import httpx
+
+async def handle_calendar_request(incoming_access_token: str):
+    await api_client.verify_access_token(access_token=incoming_access_token)
+
+    result = await api_client.get_token_on_behalf_of(
+        access_token=incoming_access_token,
+        audience="https://calendar-api.example.com",
+        scope="calendar:read calendar:write"
+    )
+
+    async with httpx.AsyncClient() as client:
+        downstream_response = await client.get(
+            "https://calendar-api.example.com/events",
+            headers={"Authorization": f"Bearer {result['access_token']}"}
+        )
+
+    downstream_response.raise_for_status()
+
+    return downstream_response.json()
+```
+
+The OBO wrapper reuses the existing RFC 8693 exchange support and fixes both token-type parameters
+to Auth0 access-token exchange. In the current implementation, the SDK forwards the incoming access
+token as the `subject_token` and relies on Auth0 to handle any DPoP-specific behavior for that token.
+The OBO result only includes access-token-oriented fields. It does not expose `id_token` or
+`refresh_token`.
+
+#### Inspecting Delegation After Token Verification
+
+When a downstream API or `MCP` server receives an access token that may have been issued through
+delegation, it can verify the token first and then inspect the `act` claim to identify the current
+actor for authorization and the full delegation chain for logging or audit.
+
+```python
+import logging
+
+from auth0_api_python import (
+    ApiClient,
+    ApiClientOptions,
+    get_current_actor,
+    get_delegation_chain,
+)
+
+logger = logging.getLogger(__name__)
+
+api_client = ApiClient(ApiClientOptions(
+    domain="<AUTH0_DOMAIN>",
+    audience="<AUTH0_AUDIENCE>",
+))
+
+async def authorize_delegated_request(access_token: str):
+    claims = await api_client.verify_access_token(access_token=access_token)
+
+    current_actor = get_current_actor(claims)
+    delegation_chain = get_delegation_chain(claims)
+
+    if current_actor != "mcp_server_client_id":
+        raise PermissionError("unexpected actor")
+
+    logger.info(
+        "delegated request",
+        extra={
+            "user_sub": claims["sub"],
+            "current_actor": current_actor,
+            "delegation_chain": delegation_chain,
+        },
+    )
+
+    return claims
+```
+
+Only the outermost `act.sub` represents the current actor and should be used for authorization
+decisions. Nested `act` values represent prior actors in the delegation chain and are better suited
+for logging, audit, or attribution.
+
 #### Requiring Additional Claims
 
 If your application demands extra claims, specify them with `required_claims`:
