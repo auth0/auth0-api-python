@@ -27,8 +27,10 @@ class ApiClientOptions:
         dpop_required: Whether DPoP is required (default: False, allows both Bearer and DPoP).
         dpop_iat_leeway: Leeway in seconds for DPoP proof iat claim (default: 30).
         dpop_iat_offset: Maximum age in seconds for DPoP proof iat claim (default: 300).
-        client_id: Required for get_access_token_for_connection and get_token_by_exchange_profile.
-        client_secret: Required for get_access_token_for_connection and get_token_by_exchange_profile.
+        client_id: Required for get_access_token_for_connection, get_token_by_exchange_profile,
+                   and get_token_on_behalf_of.
+        client_secret: Required for get_access_token_for_connection, get_token_by_exchange_profile,
+                       and get_token_on_behalf_of.
         timeout: HTTP timeout in seconds for token endpoint requests (default: 10.0).
     """
     def __init__(
