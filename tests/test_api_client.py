@@ -2860,6 +2860,24 @@ async def test_get_token_on_behalf_of_missing_client_credentials():
 
 
 @pytest.mark.asyncio
+async def test_get_token_on_behalf_of_missing_client_secret():
+    """Test that OBO requires client_secret when only client_id is configured."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="some-client-id",
+    ))
+
+    with pytest.raises(GetTokenByExchangeProfileError) as err:
+        await api_client.get_token_on_behalf_of(
+            access_token="token",
+            audience="https://api.backend.com"
+        )
+
+    assert "client credentials are required" in str(err.value).lower()
+
+
+@pytest.mark.asyncio
 async def test_get_token_on_behalf_of_missing_audience(api_client_confidential):
     """Test that OBO requires an explicit downstream audience."""
     with pytest.raises(MissingRequiredArgumentError):

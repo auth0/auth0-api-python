@@ -35,6 +35,22 @@ def test_get_current_actor_and_delegation_chain_from_nested_act():
     ]
 
 
+def test_get_current_actor_rejects_non_object_act_claim():
+    with pytest.raises(
+        VerifyAccessTokenError,
+        match=INVALID_ACT_CLAIM_MESSAGE,
+    ):
+        get_current_actor({"sub": "auth0|user123", "act": "not-an-object"})
+
+
+def test_get_delegation_chain_rejects_non_object_act_claim():
+    with pytest.raises(
+        VerifyAccessTokenError,
+        match=INVALID_ACT_CLAIM_MESSAGE,
+    ):
+        get_delegation_chain({"sub": "auth0|user123", "act": 12345})
+
+
 def test_get_current_actor_rejects_blank_actor_subject():
     with pytest.raises(
         VerifyAccessTokenError,
