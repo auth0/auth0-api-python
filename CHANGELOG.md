@@ -1,5 +1,11 @@
 # Change Log
 
+## [1.0.0b9](https://github.com/auth0/auth0-api-python/tree/1.0.0b9) (2026-04-30)
+[Full Changelog](https://github.com/auth0/auth0-api-python/compare/1.0.0b8...1.0.0b9)
+
+**Added**
+- feat: add On Behalf Of Token Exchange support [\#88](https://github.com/auth0/auth0-api-python/pull/88) ([kishore7snehil](https://github.com/kishore7snehil))
+
 ## [1.0.0b8](https://github.com/auth0/auth0-api-python/tree/1.0.0b8) (2026-04-09)
 [Full Changelog](https://github.com/auth0/auth0-api-python/compare/1.0.0b7...1.0.0b8)
 
