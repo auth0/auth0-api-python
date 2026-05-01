@@ -5,6 +5,7 @@ A lightweight Python SDK for verifying Auth0-issued access tokens
 in server-side APIs, using Authlib for OIDC discovery and JWKS fetching.
 """
 
+from .act import get_current_actor, get_delegation_chain
 from .api_client import ApiClient
 from .cache import CacheAdapter, InMemoryCache
 from .config import ApiClientOptions
@@ -14,7 +15,11 @@ from .errors import (
     DomainsResolverError,
     GetTokenByExchangeProfileError,
 )
-from .types import DomainsResolver, DomainsResolverContext
+from .types import (
+    DomainsResolver,
+    DomainsResolverContext,
+    OnBehalfOfTokenResult,
+)
 
 __all__ = [
     "ApiClient",
@@ -26,5 +31,8 @@ __all__ = [
     "DomainsResolverContext",
     "DomainsResolverError",
     "GetTokenByExchangeProfileError",
+    "get_current_actor",
+    "get_delegation_chain",
     "InMemoryCache",
+    "OnBehalfOfTokenResult",
 ]
