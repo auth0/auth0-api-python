@@ -11,7 +11,7 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
-python = "^3.9"
+python = ">=3.9.2"
 authlib = "^1.0"      # For JWT/OIDC features
 requests = "^2.31.0"  # If you use requests for HTTP calls (e.g., discovery)
 httpx = "^0.28.1"
