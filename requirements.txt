@@ -1,9 +1,9 @@
 # This file is maintained manually for SCA scanning (.github/workflows/sca_scan.yml)
 # Source of truth for dependencies: pyproject.toml + poetry.lock
 
-authlib>=1.6.9
+authlib>=1.6.12
 httpx>=0.28.1
-ada-url>=1.30.0; python_version >= "3.10"
+ada-url>=1.32.0; python_version >= "3.10"
 ada-url>=1.27.0; python_version < "3.10"
 pytest>=8.0
 pytest-cov>=4.0
