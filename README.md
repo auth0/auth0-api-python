@@ -42,7 +42,7 @@ This library is part of Auth0's Python ecosystem for server-side authentication 
 
 ### 1. Install the SDK
 
-_This library requires Python 3.9+._
+_This library requires Python 3.9.2+._
 
 ```shell
 pip install auth0-api-python
