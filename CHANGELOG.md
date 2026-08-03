@@ -1,5 +1,16 @@
 # Change Log
 
+## [1.0.0b10](https://github.com/auth0/auth0-api-python/tree/1.0.0b10) (2026-08-03)
+[Full Changelog](https://github.com/auth0/auth0-api-python/compare/1.0.0b9...1.0.0b10)
+
+**Deprecation**
+- Support for Python 3.9.0 and 3.9.1 is dropped. 
+- Support for Python 3.9 can be dropped in future releases. Please plan your upgrades accordingly.
+
+**Changed**
+- chore: Updated Dependencies [\#93](https://github.com/auth0/auth0-api-python/pull/93) ([rmad17](https://github.com/rmad17))
+- chore: Documentation and dependency update [\#115](https://github.com/auth0/auth0-api-python/pull/115) ([rmad17](https://github.com/rmad17))
+
 ## [1.0.0b9](https://github.com/auth0/auth0-api-python/tree/1.0.0b9) (2026-04-30)
 [Full Changelog](https://github.com/auth0/auth0-api-python/compare/1.0.0b8...1.0.0b9)
 
