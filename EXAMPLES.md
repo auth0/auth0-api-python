@@ -273,3 +273,65 @@ async def verify_dpop_token(access_token, dpop_proof, http_method, http_url):
         "proof_claims": proof_claims
     }
 ```
+
+## Anonymous Callers
+
+Anonymous Sessions give a visitor an Auth0 identity before they log in. The access token issued for an anonymous session is a standard Auth0 Bearer JWT, so this SDK validates it like any other token. The one difference is the `sub` claim, which starts with `anon@`.
+
+An anonymous token passes verification by default. To treat anonymous callers differently, or block them, check the `sub` claim after verifying the token. The SDK does not make that authorization decision for you.
+
+### Serve everyone, branch in the handler
+
+```python
+import asyncio
+from auth0_api_python import ApiClient, ApiClientOptions
+
+async def handle_cart(headers):
+    api_client = ApiClient(ApiClientOptions(
+        domain="your-tenant.auth0.com",
+        audience="https://api.example.com"
+    ))
+
+    claims = await api_client.verify_request(headers=headers)
+    is_anonymous = claims.get("sub", "").startswith("anon@")
+
+    if is_anonymous:
+        return {"cart": load_guest_cart(claims["sub"])}
+    return {"cart": load_user_cart(claims["sub"])}
+```
+
+### Block anonymous callers on a specific route
+
+```python
+async def handle_checkout(headers):
+    api_client = ApiClient(ApiClientOptions(
+        domain="your-tenant.auth0.com",
+        audience="https://api.example.com"
+    ))
+
+    claims = await api_client.verify_request(headers=headers)
+    if claims.get("sub", "").startswith("anon@"):
+        raise PermissionError("Anonymous callers are not allowed on this route")
+
+    return {"order": create_order(claims["sub"])}
+```
+
+### Block anonymous callers everywhere
+
+The SDK has no global "reject anonymous" switch. Centralize the check in whatever shared layer your framework uses for auth (middleware, a FastAPI dependency, a decorator).
+
+```python
+async def require_logged_in_user(headers):
+    api_client = ApiClient(ApiClientOptions(
+        domain="your-tenant.auth0.com",
+        audience="https://api.example.com"
+    ))
+
+    claims = await api_client.verify_request(headers=headers)
+    if claims.get("sub", "").startswith("anon@"):
+        raise PermissionError("Anonymous callers are not allowed")
+    return claims
+```
+
+> [!NOTE]
+> The `anon@` prefix on `sub` is the only signal that distinguishes an anonymous caller from a logged-in user.
