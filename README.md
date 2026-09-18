@@ -18,6 +18,7 @@ This SDK provides comprehensive support for securing APIs with Auth0-issued acce
 ### **Core Features**
 - **Unified Entry Point**: `verify_request()` - automatically detects and validates Bearer or DPoP schemes
 - **Multi-Custom Domain (MCD)** - Accept tokens from multiple Auth0 domains with static lists or dynamic resolvers
+- **Organization Policy** - Enforce and optionally allowlist the `org_id` claim on incoming tokens
 - **OIDC Discovery** - Automatic fetching of Auth0 metadata and JWKS with per-issuer caching
 - **JWT Validation** - Complete RS256 signature verification with claim validation
 - **DPoP Proof Verification** - Full RFC 9449 compliance with ES256 signature validation
@@ -406,6 +407,25 @@ For hybrid mode (migration scenarios), resolver patterns, error handling, and ca
 
 - **[Multi-Custom Domain Guide](docs/MultipleCustomDomain.md)** - Configuration modes, resolver patterns, migration, error handling
 - **[Caching Guide](docs/Caching.md)** - Cache tuning, custom adapters (Redis, Memcached)
+
+### 8. Organization Policy
+
+For APIs that need to enforce an Auth0 Organization context on every request, optionally restricted to a specific set of Organizations:
+
+```python
+from auth0_api_python import ApiClient, ApiClientOptions
+
+api_client = ApiClient(ApiClientOptions(
+    domain="tenant.auth0.com",
+    audience="https://api.example.com",
+    organization_policy="required",
+    organization_id=["org_abc123", "org_def456"]
+))
+
+claims = await api_client.verify_access_token(access_token)
+```
+
+See the **[Organization Policy Guide](docs/OrganizationPolicy.md)** for policy modes, the allowlist, and error handling.
 
 ## Feedback
 
