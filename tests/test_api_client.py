@@ -31,7 +31,9 @@ from auth0_api_python.errors import (
     InvalidAuthSchemeError,
     InvalidDpopProofError,
     MissingAuthorizationError,
+    MissingOrganizationError,
     MissingRequiredArgumentError,
+    OrganizationNotAllowedError,
     VerifyAccessTokenError,
 )
 from auth0_api_python.token_utils import (
@@ -469,6 +471,205 @@ async def test_verify_access_token_fail_malformed_token():
         await api_client.verify_access_token("header.pay!load.signature")
     assert "failed to parse token" in str(e.value).lower()
 
+
+# ===== Organization Policy: verify_access_token Enforcement =====
+
+@pytest.mark.asyncio
+async def test_organization_policy_missing_org_id_when_required(httpx_mock: HTTPXMock):
+    """Test that a token with no org_id claim is rejected when organization_policy is 'required'."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={
+            "issuer": "https://auth0.local/",
+            "jwks_uri": JWKS_URL
+        }
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={
+            "keys": [
+                {
+                    "kty": "RSA",
+                    "kid": "TEST_KEY",
+                    "n": "whYOFK2Ocbbpb_zVypi9SeKiNUqKQH0zTKN1-6fpCTu6ZalGI82s7XK3tan4dJt90ptUPKD2zvxqTzFNfx4HHHsrYCf2-FMLn1VTJfQazA2BvJqAwcpW1bqRUEty8tS_Yv4hRvWfQPcc2Gc3-_fQOOW57zVy-rNoJc744kb30NjQxdGp03J2S3GLQu7oKtSDDPooQHD38PEMNnITf0pj-KgDPjymkMGoJlO3aKppsjfbt_AH6GGdRghYRLOUwQU-h-ofWHR3lbYiKtXPn5dN24kiHy61e3VAQ9_YAZlwXC_99GGtw_NpghFAuM4P1JDn0DppJldy3PGFC0GfBCZASw",
+                    "e": "AQAB",
+                    "alg": "RS256",
+                    "use": "sig"
+                }
+            ]
+        }
+    )
+
+    access_token = await generate_token(
+        domain="auth0.local",
+        user_id="user_123",
+        audience="my-audience",
+        issuer=None,
+        iat=True,
+        exp=True,
+    )
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        organization_policy="required",
+    ))
+
+    with pytest.raises(MissingOrganizationError) as err:
+        await api_client.verify_access_token(access_token=access_token)
+
+    assert err.value.get_error_code() == "missing_organization"
+
+
+@pytest.mark.asyncio
+async def test_organization_policy_disallowed_org(httpx_mock: HTTPXMock):
+    """Test that a token whose org_id is not in the allowlist is rejected."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={
+            "issuer": "https://auth0.local/",
+            "jwks_uri": JWKS_URL
+        }
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={
+            "keys": [
+                {
+                    "kty": "RSA",
+                    "kid": "TEST_KEY",
+                    "n": "whYOFK2Ocbbpb_zVypi9SeKiNUqKQH0zTKN1-6fpCTu6ZalGI82s7XK3tan4dJt90ptUPKD2zvxqTzFNfx4HHHsrYCf2-FMLn1VTJfQazA2BvJqAwcpW1bqRUEty8tS_Yv4hRvWfQPcc2Gc3-_fQOOW57zVy-rNoJc744kb30NjQxdGp03J2S3GLQu7oKtSDDPooQHD38PEMNnITf0pj-KgDPjymkMGoJlO3aKppsjfbt_AH6GGdRghYRLOUwQU-h-ofWHR3lbYiKtXPn5dN24kiHy61e3VAQ9_YAZlwXC_99GGtw_NpghFAuM4P1JDn0DppJldy3PGFC0GfBCZASw",
+                    "e": "AQAB",
+                    "alg": "RS256",
+                    "use": "sig"
+                }
+            ]
+        }
+    )
+
+    access_token = await generate_token(
+        domain="auth0.local",
+        user_id="user_123",
+        audience="my-audience",
+        issuer=None,
+        iat=True,
+        exp=True,
+        claims={"org_id": "org_untrusted"},
+    )
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        organization_policy="required",
+        organization_id=["org_abc123", "org_def456"],
+    ))
+
+    with pytest.raises(OrganizationNotAllowedError) as err:
+        await api_client.verify_access_token(access_token=access_token)
+
+    assert err.value.get_error_code() == "organization_not_allowed"
+
+
+@pytest.mark.asyncio
+async def test_organization_policy_allowed_org_succeeds(httpx_mock: HTTPXMock):
+    """Test that a token with an allowlisted org_id verifies successfully."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={
+            "issuer": "https://auth0.local/",
+            "jwks_uri": JWKS_URL
+        }
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={
+            "keys": [
+                {
+                    "kty": "RSA",
+                    "kid": "TEST_KEY",
+                    "n": "whYOFK2Ocbbpb_zVypi9SeKiNUqKQH0zTKN1-6fpCTu6ZalGI82s7XK3tan4dJt90ptUPKD2zvxqTzFNfx4HHHsrYCf2-FMLn1VTJfQazA2BvJqAwcpW1bqRUEty8tS_Yv4hRvWfQPcc2Gc3-_fQOOW57zVy-rNoJc744kb30NjQxdGp03J2S3GLQu7oKtSDDPooQHD38PEMNnITf0pj-KgDPjymkMGoJlO3aKppsjfbt_AH6GGdRghYRLOUwQU-h-ofWHR3lbYiKtXPn5dN24kiHy61e3VAQ9_YAZlwXC_99GGtw_NpghFAuM4P1JDn0DppJldy3PGFC0GfBCZASw",
+                    "e": "AQAB",
+                    "alg": "RS256",
+                    "use": "sig"
+                }
+            ]
+        }
+    )
+
+    access_token = await generate_token(
+        domain="auth0.local",
+        user_id="user_123",
+        audience="my-audience",
+        issuer=None,
+        iat=True,
+        exp=True,
+        claims={"org_id": "org_abc123"},
+    )
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        organization_policy="required",
+        organization_id=["org_abc123", "org_def456"],
+    ))
+
+    claims = await api_client.verify_access_token(access_token=access_token)
+
+    assert claims["sub"] == "user_123"
+    assert claims["org_id"] == "org_abc123"
+
+
+@pytest.mark.asyncio
+async def test_organization_policy_default_allow_does_not_require_org_id(httpx_mock: HTTPXMock):
+    """Test that the default 'allow' policy accepts a token with no org_id claim (no behavior change)."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={
+            "issuer": "https://auth0.local/",
+            "jwks_uri": JWKS_URL
+        }
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={
+            "keys": [
+                {
+                    "kty": "RSA",
+                    "kid": "TEST_KEY",
+                    "n": "whYOFK2Ocbbpb_zVypi9SeKiNUqKQH0zTKN1-6fpCTu6ZalGI82s7XK3tan4dJt90ptUPKD2zvxqTzFNfx4HHHsrYCf2-FMLn1VTJfQazA2BvJqAwcpW1bqRUEty8tS_Yv4hRvWfQPcc2Gc3-_fQOOW57zVy-rNoJc744kb30NjQxdGp03J2S3GLQu7oKtSDDPooQHD38PEMNnITf0pj-KgDPjymkMGoJlO3aKppsjfbt_AH6GGdRghYRLOUwQU-h-ofWHR3lbYiKtXPn5dN24kiHy61e3VAQ9_YAZlwXC_99GGtw_NpghFAuM4P1JDn0DppJldy3PGFC0GfBCZASw",
+                    "e": "AQAB",
+                    "alg": "RS256",
+                    "use": "sig"
+                }
+            ]
+        }
+    )
+
+    access_token = await generate_token(
+        domain="auth0.local",
+        user_id="user_123",
+        audience="my-audience",
+        issuer=None,
+        iat=True,
+        exp=True,
+    )
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+    ))
+
+    claims = await api_client.verify_access_token(access_token=access_token)
+
+    assert claims["sub"] == "user_123"
 
 
 # DPOP PROOF VERIFICATION TESTS
@@ -3258,6 +3459,21 @@ async def test_cache_config_validation():
 
 
 @pytest.mark.asyncio
+async def test_organization_id_with_allow_policy_raises_at_construction(httpx_mock: HTTPXMock):
+    """Test that organization_id with organization_policy='allow' raises ConfigurationError
+    at ApiClient construction time, before any request is made."""
+    with pytest.raises(ConfigurationError, match="organization_id is only valid when organization_policy is 'required'"):
+        ApiClient(ApiClientOptions(
+            domain="auth0.local",
+            audience="my-audience",
+            organization_policy="allow",
+            organization_id="org_abc123",
+        ))
+
+    assert_no_requests(httpx_mock)
+
+
+@pytest.mark.asyncio
 async def test_mcd_resolve_allowed_domains_static_list():
     """Test _resolve_allowed_domains with static list."""
     api_client = ApiClient(ApiClientOptions(
@@ -4417,3 +4633,4 @@ async def test_mcd_verify_request_with_resolver_context(httpx_mock):
     assert ctx["request_headers"]["authorization"] == f"Bearer {token}"
     assert ctx["request_headers"]["x-custom-header"] == "test-value"
     assert ctx["unverified_iss"] == "https://tenant1.auth0.com/"
+
