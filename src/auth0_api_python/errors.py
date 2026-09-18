@@ -56,6 +56,20 @@ class VerifyAccessTokenError(BaseAuthError):
         return "invalid_token"
 
 
+class MissingOrganizationError(VerifyAccessTokenError):
+    """Error raised when organization_policy is 'required' but the token has no org_id claim."""
+
+    def get_error_code(self) -> str:
+        return "missing_organization"
+
+
+class OrganizationNotAllowedError(VerifyAccessTokenError):
+    """Error raised when the token's org_id claim is not in the organization_id allowlist."""
+
+    def get_error_code(self) -> str:
+        return "organization_not_allowed"
+
+
 class InvalidAuthSchemeError(BaseAuthError):
     """Error raised when the provided authentication scheme is unsupported."""
 
