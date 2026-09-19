@@ -60,6 +60,39 @@ asyncio.run(exchange_on_behalf_of())
 In the current implementation, `get_token_on_behalf_of()` forwards the incoming access token as
 the [RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693#section-2.1) `subject_token` and relies on Auth0 to handle any DPoP-specific behavior for that token.
 
+## Building a Principal
+
+Use `build_principal()` to normalize a verified access token's claims into a `Principal`, so tool
+code can read the caller's identity, scopes, permissions, and organization without reaching into
+the raw claims dict.
+
+```python
+import asyncio
+
+from auth0_api_python import ApiClient, ApiClientOptions, build_principal
+
+async def build_caller_principal(headers):
+    api_client = ApiClient(ApiClientOptions(
+        domain="your-tenant.auth0.com",
+        audience="https://calendar-api.example.com"
+    ))
+
+    claims = await api_client.verify_request(headers=headers)
+    principal = build_principal(claims)
+
+    print(principal.sub)
+    print(principal.scopes)
+    print(principal.permissions)
+    print(principal.client_id)
+    print(principal.org_id)
+
+    return principal
+
+# Example usage
+headers = {"authorization": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."}
+asyncio.run(build_caller_principal(headers))
+```
+
 ## Inspecting Delegation After Token Verification
 
 When a downstream API or `MCP` server receives an access token that may have been issued through

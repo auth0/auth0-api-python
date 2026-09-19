@@ -96,6 +96,8 @@ asyncio.run(main())
 
 In this example, the returned dictionary contains the decoded claims (like `sub`, `scope`, etc.) from the verified token.
 
+You can also pass these claims to `build_principal()` to get a normalized `Principal` with the caller's subject, scopes, permissions, client ID, and organization already parsed out. See [EXAMPLES.md](./EXAMPLES.md#building-a-principal) for a full example.
+
 ### 4. Get an access token for a connection
 
 If you need to get an access token for an upstream idp via a connection, you can use the `get_access_token_for_connection` method:
