@@ -1,9 +1,13 @@
+import hashlib
 import time
 
 import pytest
 
 from auth0_api_python import Principal, build_principal
 from auth0_api_python.errors import VerifyAccessTokenError
+
+_TOKEN = "some.fake.access.token"
+_TOKEN_FINGERPRINT = hashlib.sha256(_TOKEN.encode()).hexdigest()
 
 
 def test_build_principal_with_all_claims_present():
@@ -16,7 +20,7 @@ def test_build_principal_with_all_claims_present():
         "org_id": "org_abc123",
     }
 
-    principal = build_principal(claims)
+    principal = build_principal(claims, access_token=_TOKEN)
 
     assert principal == Principal(
         sub="auth0|user123",
@@ -25,6 +29,7 @@ def test_build_principal_with_all_claims_present():
         permissions=["calendar:read", "calendar:write"],
         client_id="my_client_id",
         org_id="org_abc123",
+        token_fingerprint=_TOKEN_FINGERPRINT,
     )
 
 
@@ -34,7 +39,7 @@ def test_build_principal_missing_org_id():
         "exp": int(time.time()) + 3600,
     }
 
-    principal = build_principal(claims)
+    principal = build_principal(claims, access_token=_TOKEN)
 
     assert principal.org_id is None
 
@@ -45,7 +50,7 @@ def test_build_principal_missing_permissions_is_none():
         "exp": int(time.time()) + 3600,
     }
 
-    principal = build_principal(claims)
+    principal = build_principal(claims, access_token=_TOKEN)
 
     assert principal.permissions is None
 
@@ -57,7 +62,7 @@ def test_build_principal_permissions_present_but_empty():
         "permissions": [],
     }
 
-    principal = build_principal(claims)
+    principal = build_principal(claims, access_token=_TOKEN)
 
     assert principal.permissions == []
 
@@ -68,7 +73,7 @@ def test_build_principal_missing_both_org_id_and_permissions():
         "exp": int(time.time()) + 3600,
     }
 
-    principal = build_principal(claims)
+    principal = build_principal(claims, access_token=_TOKEN)
 
     assert principal.org_id is None
     assert principal.permissions is None
@@ -81,7 +86,7 @@ def test_build_principal_client_id_falls_back_to_azp():
         "azp": "spa_client_id",
     }
 
-    principal = build_principal(claims)
+    principal = build_principal(claims, access_token=_TOKEN)
 
     assert principal.client_id == "spa_client_id"
 
@@ -92,7 +97,7 @@ def test_build_principal_missing_scope_claim_yields_empty_list():
         "exp": int(time.time()) + 3600,
     }
 
-    principal = build_principal(claims)
+    principal = build_principal(claims, access_token=_TOKEN)
 
     assert principal.scopes == []
 
@@ -103,4 +108,27 @@ def test_build_principal_rejects_missing_sub():
     }
 
     with pytest.raises(VerifyAccessTokenError, match="sub"):
-        build_principal(claims)
+        build_principal(claims, access_token=_TOKEN)
+
+
+def test_build_principal_sets_token_fingerprint():
+    claims = {
+        "sub": "auth0|user123",
+        "exp": int(time.time()) + 3600,
+    }
+
+    principal = build_principal(claims, access_token=_TOKEN)
+
+    assert principal.token_fingerprint == _TOKEN_FINGERPRINT
+
+
+def test_build_principal_different_tokens_produce_different_fingerprints():
+    claims = {
+        "sub": "auth0|user123",
+        "exp": int(time.time()) + 3600,
+    }
+
+    p1 = build_principal(claims, access_token="token-one")
+    p2 = build_principal(claims, access_token="token-two")
+
+    assert p1.token_fingerprint != p2.token_fingerprint

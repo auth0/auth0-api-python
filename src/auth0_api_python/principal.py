@@ -2,8 +2,9 @@
 Verified caller identity, normalized from access token claims.
 """
 
+import hashlib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from .errors import VerifyAccessTokenError
@@ -22,6 +23,9 @@ class Principal:
             the token (RBAC not enabled on the API), a list (possibly empty) when present.
         client_id: From the "client_id" claim, falling back to "azp". None if neither is present.
         org_id: From the "org_id" claim. None when the token carries no Organization.
+        token_fingerprint: SHA-256 of the access token this Principal was built from.
+            Set by build_principal; used to verify the Principal is paired with the
+            correct token before activating any token cache.
     """
 
     sub: str
@@ -30,15 +34,19 @@ class Principal:
     permissions: Optional[list[str]]
     client_id: Optional[str]
     org_id: Optional[str]
+    token_fingerprint: Optional[str] = field(default=None, repr=False)
 
 
-def build_principal(claims: Mapping[str, Any]) -> Principal:
+def build_principal(claims: Mapping[str, Any], access_token: str) -> Principal:
     """
     Build a Principal from a verified access token's claims.
 
     Args:
         claims: The claims dict returned by ApiClient.verify_access_token. This must be
             the already-verified claims, never a raw token or unverified input.
+        access_token: The raw access token string that was verified to produce claims.
+            Binds the Principal to a specific token so the token cache cannot be
+            activated with a mismatched token.
 
     Returns:
         A Principal normalizing the claims tool code needs.
@@ -64,4 +72,5 @@ def build_principal(claims: Mapping[str, Any]) -> Principal:
         permissions=permissions,
         client_id=client_id,
         org_id=claims.get("org_id"),
+        token_fingerprint=hashlib.sha256(access_token.encode()).hexdigest(),
     )
