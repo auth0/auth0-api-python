@@ -112,7 +112,7 @@ async def build_caller_principal(headers):
 
     access_token = headers.get("authorization", "").removeprefix("Bearer ").strip()
     claims = await api_client.verify_access_token(access_token=access_token)
-    principal = build_principal(claims, access_token=access_token)
+    principal = build_principal(claims)
 
     print(principal.sub)
     print(principal.scopes)
