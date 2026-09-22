@@ -10,21 +10,21 @@ bearer token.
 Caching is disabled by default. Without a `token_store`, every call to `get_token_on_behalf_of()`
 performs a fresh exchange and nothing is stored.
 
-To enable caching, pass a `token_store` to `ApiClientOptions` and pass `principal` (from
-`build_principal()`) to each `get_token_on_behalf_of()` call. Caching only activates when both are
-present, so existing callers that omit `principal` or `token_store` see no behavior change.
+To enable caching, pass a `token_store` to `ApiClientOptions`. Once a store is configured, the SDK
+automatically builds a cache key from the incoming token and no additional argument is needed per
+call.
 
 ## On Behalf Of Exchange with Caching
 
-The following example verifies an incoming token, builds a principal, and exchanges for a
-downstream token. The result is cached so a second call for the same caller, audience, org, and
-scopes returns the cached token without hitting Auth0 again.
+The following example verifies an incoming token and exchanges for a downstream token. The result
+is cached so a second call for the same caller, audience, org, and scopes returns the cached token
+without hitting Auth0 again.
 
 ```python
 import asyncio
 import httpx
 
-from auth0_api_python import ApiClient, ApiClientOptions, build_principal
+from auth0_api_python import ApiClient, ApiClientOptions
 
 async def exchange_on_behalf_of_cached(your_token_store):
     api_client = ApiClient(ApiClientOptions(
@@ -38,13 +38,11 @@ async def exchange_on_behalf_of_cached(your_token_store):
     incoming_access_token = "incoming-auth0-access-token"
 
     claims = await api_client.verify_access_token(access_token=incoming_access_token)
-    principal = build_principal(claims, access_token=incoming_access_token)
 
     result = await api_client.get_token_on_behalf_of(
         access_token=incoming_access_token,
         audience="https://calendar-api.example.com",
         scope="calendar:read calendar:write",
-        principal=principal,
     )
 
     async with httpx.AsyncClient() as client:

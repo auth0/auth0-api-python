@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import logging
 import time
 from collections.abc import Mapping, Sequence
@@ -26,7 +25,6 @@ from .errors import (
     TokenStoreError,
     VerifyAccessTokenError,
 )
-from .principal import Principal
 from .token_store import obo_cache_key, session_fingerprint
 from .types import OnBehalfOfTokenResult
 from .utils import (
@@ -1005,7 +1003,6 @@ class ApiClient:
         access_token: str,
         audience: str,
         scope: Optional[str] = None,
-        principal: Optional[Principal] = None,
     ) -> OnBehalfOfTokenResult:
         """
         Exchange an Auth0 access token for another Auth0 access token targeting a downstream API
@@ -1018,10 +1015,6 @@ class ApiClient:
             access_token: The Auth0 access token to exchange
             audience: Target API identifier for the exchanged access token
             scope: Optional space-separated OAuth 2.0 scopes to request
-            principal: The verified caller identity, from build_principal(). When provided, the
-                exchanged token is cached and reused for the same caller, audience, organization,
-                scope set, and session, avoiding a redundant exchange on the next call. When
-                omitted, every call performs a fresh exchange and nothing is cached.
 
         Returns:
             Dictionary containing:
@@ -1032,6 +1025,10 @@ class ApiClient:
             - token_type (str, optional): Token type (typically "Bearer")
             - issued_token_type (str, optional): RFC 8693 issued token type identifier
 
+        Caching is enabled only when a token_store is configured on the client. The cache key
+        is derived from the token's subject, the audience, organization, requested scopes, and
+        session. No store means every call performs a fresh exchange and nothing is cached.
+
         Raises:
             MissingRequiredArgumentError: If required parameters are missing
             GetTokenByExchangeProfileError: If client credentials are not configured or validation fails
@@ -1041,38 +1038,43 @@ class ApiClient:
             raise MissingRequiredArgumentError("audience")
 
         cache_key = None
-        if principal is not None and self._token_store is not None:
-            token_hash = hashlib.sha256(access_token.encode()).hexdigest()
-            if principal.token_fingerprint is None or principal.token_fingerprint != token_hash:
-                # Principal not bound to this token — skip cache to prevent cross-token pollution.
-                logging.warning(
-                    "Principal token fingerprint does not match access_token; skipping cache"
-                )
-            else:
+        if self._token_store is not None:
+            sub = None
+            try:
+                payload = get_unverified_payload(access_token)
+                sub = payload.get("sub")
+            except ValueError:
+                logging.warning("Could not decode access token for cache key, skipping cache")
+
+            if isinstance(sub, str) and sub:
+                org_id = payload.get("org_id") if isinstance(payload.get("org_id"), str) else None
                 cache_key = obo_cache_key(
-                    sub=principal.sub,
+                    sub=sub,
                     audience=audience,
-                    org_id=principal.org_id,
+                    org_id=org_id,
                     scopes=scope,
                     session_key=session_fingerprint(access_token),
                 )
+            elif sub is not None:
+                logging.warning("Access token has no usable sub claim, skipping cache")
 
-            cached = None
-            try:
-                cached = await self._token_store.get(cache_key)
-            except Exception as exc:
-                store_err = TokenStoreError("Token store read failed", cause=exc)
-                logging.warning("Token store read failed, treating as cache miss: %s", store_err.cause)
+            if cache_key is not None:
+                cached = None
+                try:
+                    cached = await self._token_store.get(cache_key)
+                except Exception as exc:
+                    store_err = TokenStoreError("Token store read failed", cause=exc)
+                    logging.warning("Token store read failed, treating as cache miss: %s", store_err.cause)
 
-            if cached is not None:
-                if "access_token" not in cached or "expires_at" not in cached:
-                    logging.warning("Token store returned a malformed entry, treating as cache miss")
-                elif cached["expires_at"] > int(time.time()):
-                    return {
-                        "access_token": cached["access_token"],
-                        "expires_in": cached["expires_at"] - int(time.time()),
-                        "expires_at": cached["expires_at"],
-                    }
+                if cached is not None:
+                    if "access_token" not in cached or "expires_at" not in cached:
+                        logging.warning("Token store returned a malformed entry, treating as cache miss")
+                    elif cached["expires_at"] > int(time.time()):
+                        return {
+                            "access_token": cached["access_token"],
+                            "expires_in": cached["expires_at"] - int(time.time()),
+                            "expires_at": cached["expires_at"],
+                        }
 
         result = await self.get_token_by_exchange_profile(
             subject_token=access_token,

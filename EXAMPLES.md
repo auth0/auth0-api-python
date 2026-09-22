@@ -62,12 +62,10 @@ the [RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693#section-2.1) `subje
 
 ### Caching the Exchanged Token
 
-To cache the exchanged token, pass a `token_store` when constructing `ApiClient` and pass
-`principal` (from `build_principal()`) to each `get_token_on_behalf_of()` call. Without
-`principal`, every call performs a fresh exchange and nothing is cached.
+To cache the exchanged token, pass a `token_store` when constructing `ApiClient`. Caching activates automatically once a store is configured. The SDK reads `sub` from the incoming token to build the cache key, so no additional argument is needed on each call.
 
 ```python
-from auth0_api_python import ApiClient, ApiClientOptions, build_principal
+from auth0_api_python import ApiClient, ApiClientOptions
 
 # token_store is your AbstractTokenStore implementation (e.g. Redis-backed).
 # See docs/TokenStorage.md for how to build one.
@@ -80,13 +78,11 @@ api_client = ApiClient(ApiClientOptions(
 ))
 
 claims = await api_client.verify_access_token(access_token=incoming_access_token)
-principal = build_principal(claims, access_token=incoming_access_token)
 
 result = await api_client.get_token_on_behalf_of(
     access_token=incoming_access_token,
     audience="https://calendar-api.example.com",
     scope="calendar:read calendar:write",
-    principal=principal,
 )
 ```
 

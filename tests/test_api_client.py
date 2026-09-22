@@ -21,7 +21,7 @@ from conftest import (
 from freezegun import freeze_time
 from pytest_httpx import HTTPXMock
 
-from auth0_api_python import Principal, get_current_actor, get_delegation_chain
+from auth0_api_python import get_current_actor, get_delegation_chain
 from auth0_api_python.api_client import MAX_ARRAY_VALUES_PER_KEY, ApiClient
 from auth0_api_python.config import ApiClientOptions
 from auth0_api_python.errors import (
@@ -3270,25 +3270,6 @@ async def test_get_token_on_behalf_of_empty_access_token(api_client_confidential
 
 # ----- OBO -----
 
-_DEFAULT_OBO_TOKEN = "incoming-access-token"  # noqa: S105
-
-
-def _make_principal(
-    sub: str = "auth0|user1", org_id=None, access_token: str = _DEFAULT_OBO_TOKEN
-) -> Principal:
-    """Build a minimal Principal for OBO cache-key tests, bound to the given access_token."""
-    import hashlib
-
-    return Principal(
-        sub=sub,
-        expires_at=int(time.time()) + 3600,
-        scopes=[],
-        permissions=None,
-        client_id=None,
-        org_id=org_id,
-        token_fingerprint=hashlib.sha256(access_token.encode()).hexdigest(),
-    )
-
 
 class _RaisingGetTokenStore(_TestTokenStore):
     """Token store whose get() always raises, to verify read failures fall back to a fresh exchange."""
@@ -3305,10 +3286,16 @@ class _RaisingSetTokenStore(_TestTokenStore):
 
 
 @pytest.mark.asyncio
-async def test_get_token_on_behalf_of_without_principal_always_fresh_exchange(
-    mock_discovery, api_client_confidential, httpx_mock
+async def test_get_token_on_behalf_of_no_token_store_always_fresh_exchange(
+    mock_discovery, httpx_mock
 ):
-    """Test that omitting principal performs a fresh exchange on every call (backward compatible)."""
+    """Test that no token_store means every call performs a fresh exchange."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+    ))
     httpx_mock.add_response(
         method="POST",
         url=TOKEN_ENDPOINT,
@@ -3320,14 +3307,10 @@ async def test_get_token_on_behalf_of_without_principal_always_fresh_exchange(
         json=token_success(access_token="obo-access-token-2"),
     )
 
-    result1 = await api_client_confidential.get_token_on_behalf_of(
-        access_token="incoming-access-token",
-        audience="https://api.backend.com",
-    )
-    result2 = await api_client_confidential.get_token_on_behalf_of(
-        access_token="incoming-access-token",
-        audience="https://api.backend.com",
-    )
+    payload = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1"}).encode()).rstrip(b"=").decode()
+    token = f"hdr.{payload}.sig"
+    result1 = await api_client.get_token_on_behalf_of(access_token=token, audience="https://api.backend.com")
+    result2 = await api_client.get_token_on_behalf_of(access_token=token, audience="https://api.backend.com")
 
     assert result1["access_token"] == "obo-access-token-1"
     assert result2["access_token"] == "obo-access-token-2"
@@ -3336,28 +3319,27 @@ async def test_get_token_on_behalf_of_without_principal_always_fresh_exchange(
 
 
 @pytest.mark.asyncio
-async def test_get_token_on_behalf_of_with_principal_second_call_uses_cache(
+async def test_get_token_on_behalf_of_with_token_store_cache_miss_then_hit(
     mock_discovery, api_client_confidential, httpx_mock
 ):
-    """Test that a second call with the same principal/audience/scope reuses the cached token."""
+    """Test that a second call for the same token/audience/scope is served from cache."""
     httpx_mock.add_response(
         method="POST",
         url=TOKEN_ENDPOINT,
         json=token_success(access_token="obo-access-token"),
     )
-    principal = _make_principal()
 
+    payload = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1"}).encode()).rstrip(b"=").decode()
+    token = f"hdr.{payload}.sig"
     result1 = await api_client_confidential.get_token_on_behalf_of(
-        access_token="incoming-access-token",
+        access_token=token,
         audience="https://api.backend.com",
         scope="read:data",
-        principal=principal,
     )
     result2 = await api_client_confidential.get_token_on_behalf_of(
-        access_token="incoming-access-token",
+        access_token=token,
         audience="https://api.backend.com",
         scope="read:data",
-        principal=principal,
     )
 
     assert result1["access_token"] == "obo-access-token"
@@ -3367,10 +3349,10 @@ async def test_get_token_on_behalf_of_with_principal_second_call_uses_cache(
 
 
 @pytest.mark.asyncio
-async def test_get_token_on_behalf_of_different_sub_does_not_share_cache(
-    mock_discovery, api_client_confidential, httpx_mock
+async def test_get_token_on_behalf_of_undecodable_token_skips_caching(
+    mock_discovery, api_client_confidential, httpx_mock, caplog
 ):
-    """Test that principals with different sub values each trigger their own exchange."""
+    """Test that a non-JWT access_token causes caching to be skipped with a warning."""
     httpx_mock.add_response(
         method="POST",
         url=TOKEN_ENDPOINT,
@@ -3382,15 +3364,49 @@ async def test_get_token_on_behalf_of_different_sub_does_not_share_cache(
         json=token_success(access_token="obo-access-token-2"),
     )
 
-    await api_client_confidential.get_token_on_behalf_of(
-        access_token="incoming-access-token",
+    caplog.set_level(logging.WARNING)
+    result1 = await api_client_confidential.get_token_on_behalf_of(
+        access_token="not-a-jwt",
         audience="https://api.backend.com",
-        principal=_make_principal(sub="auth0|user1"),
+    )
+    result2 = await api_client_confidential.get_token_on_behalf_of(
+        access_token="not-a-jwt",
+        audience="https://api.backend.com",
+    )
+
+    assert result1["access_token"] == "obo-access-token-1"
+    assert result2["access_token"] == "obo-access-token-2"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+    assert any("Could not decode" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_different_sub_does_not_share_cache(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that tokens with different sub values each trigger their own exchange."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-1"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-2"),
+    )
+
+    payload1 = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1"}).encode()).rstrip(b"=").decode()
+    token1 = f"hdr.{payload1}.sig"
+    payload2 = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user2"}).encode()).rstrip(b"=").decode()
+    token2 = f"hdr.{payload2}.sig"
+
+    await api_client_confidential.get_token_on_behalf_of(
+        access_token=token1, audience="https://api.backend.com"
     )
     await api_client_confidential.get_token_on_behalf_of(
-        access_token="incoming-access-token",
-        audience="https://api.backend.com",
-        principal=_make_principal(sub="auth0|user2"),
+        access_token=token2, audience="https://api.backend.com"
     )
 
     token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
@@ -3401,7 +3417,7 @@ async def test_get_token_on_behalf_of_different_sub_does_not_share_cache(
 async def test_get_token_on_behalf_of_different_org_id_does_not_share_cache(
     mock_discovery, api_client_confidential, httpx_mock
 ):
-    """Test that same-sub principals with different org_id each trigger their own exchange."""
+    """Test that tokens with different org_id values each trigger their own exchange."""
     httpx_mock.add_response(
         method="POST",
         url=TOKEN_ENDPOINT,
@@ -3413,15 +3429,16 @@ async def test_get_token_on_behalf_of_different_org_id_does_not_share_cache(
         json=token_success(access_token="obo-access-token-2"),
     )
 
+    payload1 = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1", "org_id": "org_abc"}).encode()).rstrip(b"=").decode()
+    token1 = f"hdr.{payload1}.sig"
+    payload2 = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1", "org_id": "org_def"}).encode()).rstrip(b"=").decode()
+    token2 = f"hdr.{payload2}.sig"
+
     await api_client_confidential.get_token_on_behalf_of(
-        access_token="incoming-access-token",
-        audience="https://api.backend.com",
-        principal=_make_principal(org_id="org_abc"),
+        access_token=token1, audience="https://api.backend.com"
     )
     await api_client_confidential.get_token_on_behalf_of(
-        access_token="incoming-access-token",
-        audience="https://api.backend.com",
-        principal=_make_principal(org_id="org_def"),
+        access_token=token2, audience="https://api.backend.com"
     )
 
     token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
@@ -3446,11 +3463,12 @@ async def test_get_token_on_behalf_of_store_get_failure_falls_back_to_fresh_exch
         json=token_success(access_token="obo-access-token"),
     )
 
+    payload = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1"}).encode()).rstrip(b"=").decode()
+    token = f"hdr.{payload}.sig"
     caplog.set_level(logging.WARNING)
     result = await api_client.get_token_on_behalf_of(
-        access_token="incoming-access-token",
+        access_token=token,
         audience="https://api.backend.com",
-        principal=_make_principal(),
     )
 
     assert result["access_token"] == "obo-access-token"
@@ -3475,11 +3493,12 @@ async def test_get_token_on_behalf_of_store_set_failure_still_returns_token(
         json=token_success(access_token="obo-access-token"),
     )
 
+    payload = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1"}).encode()).rstrip(b"=").decode()
+    token = f"hdr.{payload}.sig"
     caplog.set_level(logging.WARNING)
     result = await api_client.get_token_on_behalf_of(
-        access_token="incoming-access-token",
+        access_token=token,
         audience="https://api.backend.com",
-        principal=_make_principal(),
     )
 
     assert result["access_token"] == "obo-access-token"
@@ -3510,21 +3529,21 @@ async def test_get_token_on_behalf_of_cache_hit_has_valid_expires_in(
         url=TOKEN_ENDPOINT,
         json=token_success(access_token="obo-access-token"),
     )
-    principal = _make_principal()
+
+    payload = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1"}).encode()).rstrip(b"=").decode()
+    token = f"hdr.{payload}.sig"
 
     # First call — populate cache
     await api_client_confidential.get_token_on_behalf_of(
-        access_token="incoming-access-token",
+        access_token=token,
         audience="https://api.backend.com",
         scope="read:data",
-        principal=principal,
     )
     # Second call — cache hit
     result = await api_client_confidential.get_token_on_behalf_of(
-        access_token="incoming-access-token",
+        access_token=token,
         audience="https://api.backend.com",
         scope="read:data",
-        principal=principal,
     )
 
     assert result["expires_in"] > 0
@@ -3554,18 +3573,12 @@ async def test_get_token_on_behalf_of_expired_store_entry_triggers_fresh_exchang
         url=TOKEN_ENDPOINT,
         json=token_success(access_token="fresh-token-2"),
     )
-    principal = _make_principal()
 
-    await api_client.get_token_on_behalf_of(
-        access_token="incoming-access-token",
-        audience="https://api.backend.com",
-        principal=principal,
-    )
-    await api_client.get_token_on_behalf_of(
-        access_token="incoming-access-token",
-        audience="https://api.backend.com",
-        principal=principal,
-    )
+    payload = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1"}).encode()).rstrip(b"=").decode()
+    token = f"hdr.{payload}.sig"
+
+    await api_client.get_token_on_behalf_of(access_token=token, audience="https://api.backend.com")
+    await api_client.get_token_on_behalf_of(access_token=token, audience="https://api.backend.com")
 
     token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
     assert len(token_requests) == 2
@@ -3588,12 +3601,12 @@ async def test_get_token_on_behalf_of_corrupt_store_value_treated_as_cache_miss(
         url=TOKEN_ENDPOINT,
         json=token_success(access_token="fresh-token"),
     )
-    principal = _make_principal()
 
+    payload = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1"}).encode()).rstrip(b"=").decode()
+    token = f"hdr.{payload}.sig"
     result = await api_client.get_token_on_behalf_of(
-        access_token="incoming-access-token",
+        access_token=token,
         audience="https://api.backend.com",
-        principal=principal,
     )
 
     assert result["access_token"] == "fresh-token"
@@ -3606,14 +3619,14 @@ async def test_get_token_on_behalf_of_expired_cache_entry_triggers_fresh_exchang
     mock_discovery, api_client_confidential, httpx_mock
 ):
     """Test that an expired cached entry is not returned and a fresh exchange happens."""
-    principal = _make_principal()
-    access_token = "incoming-access-token"
     audience = "https://api.backend.com"
+    payload = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1"}).encode()).rstrip(b"=").decode()
+    access_token = f"hdr.{payload}.sig"
 
     cache_key = obo_cache_key(
-        sub=principal.sub,
+        sub="auth0|user1",
         audience=audience,
-        org_id=principal.org_id,
+        org_id=None,
         scopes=None,
         session_key=session_fingerprint(access_token),
     )
@@ -3631,7 +3644,6 @@ async def test_get_token_on_behalf_of_expired_cache_entry_triggers_fresh_exchang
     result = await api_client_confidential.get_token_on_behalf_of(
         access_token=access_token,
         audience=audience,
-        principal=principal,
     )
 
     assert result["access_token"] == "fresh-obo-access-token"
