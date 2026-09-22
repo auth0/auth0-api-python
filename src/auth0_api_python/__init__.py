@@ -17,7 +17,7 @@ from .errors import (
     TokenStoreError,
 )
 from .principal import Principal, build_principal
-from .token_store import AbstractTokenStore, TokenSet
+from .token_store import AbstractTokenStore, TokenSet, obo_cache_key, session_fingerprint
 from .types import (
     DomainsResolver,
     DomainsResolverContext,
@@ -40,6 +40,8 @@ __all__ = [
     "get_delegation_chain",
     "InMemoryCache",
     "AbstractTokenStore",
+    "obo_cache_key",
+    "session_fingerprint",
     "OnBehalfOfTokenResult",
     "Principal",
     "TokenSet",
