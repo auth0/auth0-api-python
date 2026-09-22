@@ -1,6 +1,7 @@
 """Shared test fixtures and helpers for auth0-api-python tests."""
 
 import base64
+import time
 import urllib.parse
 from typing import Optional
 
@@ -9,6 +10,30 @@ from pytest_httpx import HTTPXMock
 
 from auth0_api_python import ApiClient, ApiClientOptions
 from auth0_api_python.errors import ApiError
+from auth0_api_python.token_store import AbstractTokenStore, TokenSet
+
+
+class _TestTokenStore(AbstractTokenStore):
+    """Minimal in-memory store for tests. Not for production use."""
+
+    def __init__(self, *, secret: str = "test-secret") -> None:  # noqa: S107
+        super().__init__(secret=secret)
+        self._store: dict[str, TokenSet] = {}
+
+    async def get(self, key: str) -> Optional[TokenSet]:
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        if entry["expires_at"] <= int(time.time()):
+            del self._store[key]
+            return None
+        return entry
+
+    async def set(self, key: str, value: TokenSet) -> None:
+        self._store[key] = value
+
+    async def delete(self, key: str) -> None:
+        self._store.pop(key, None)
 
 # ===== Constants =====
 
@@ -26,6 +51,7 @@ def api_client_confidential():
         audience="my-audience",
         client_id="cid",
         client_secret="csecret",
+        token_store=_TestTokenStore(),
     ))
 
 

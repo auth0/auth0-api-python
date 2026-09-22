@@ -60,11 +60,44 @@ asyncio.run(exchange_on_behalf_of())
 In the current implementation, `get_token_on_behalf_of()` forwards the incoming access token as
 the [RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693#section-2.1) `subject_token` and relies on Auth0 to handle any DPoP-specific behavior for that token.
 
+### Caching the Exchanged Token
+
+To cache the exchanged token, pass a `token_store` when constructing `ApiClient` and pass
+`principal` (from `build_principal()`) to each `get_token_on_behalf_of()` call. Without
+`principal`, every call performs a fresh exchange and nothing is cached.
+
+```python
+from auth0_api_python import ApiClient, ApiClientOptions, build_principal
+
+# token_store is your AbstractTokenStore implementation (e.g. Redis-backed).
+# See docs/TokenStorage.md for how to build one.
+api_client = ApiClient(ApiClientOptions(
+    domain="your-tenant.auth0.com",
+    audience="https://mcp-server.example.com",
+    client_id="<AUTH0_CLIENT_ID>",
+    client_secret="<AUTH0_CLIENT_SECRET>",
+    token_store=your_token_store,
+))
+
+claims = await api_client.verify_access_token(access_token=incoming_access_token)
+principal = build_principal(claims, access_token=incoming_access_token)
+
+result = await api_client.get_token_on_behalf_of(
+    access_token=incoming_access_token,
+    audience="https://calendar-api.example.com",
+    scope="calendar:read calendar:write",
+    principal=principal,
+)
+```
+
+See the **[Token Storage Guide](docs/TokenStorage.md)** for a full working example, how to
+implement a Redis-backed store, and the built-in encryption helpers.
+
 ## Building a Principal
 
-Use `build_principal()` to normalize a verified access token's claims into a `Principal`, so tool
-code can read the caller's identity, scopes, permissions, and organization without reaching into
-the raw claims dict.
+Use `build_principal()` to normalize a verified access token's claims into a `Principal`, so
+handler code can read the caller's identity, scopes, permissions, and organization without reaching
+into the raw claims dict.
 
 ```python
 import asyncio
@@ -77,8 +110,9 @@ async def build_caller_principal(headers):
         audience="https://calendar-api.example.com"
     ))
 
-    claims = await api_client.verify_request(headers=headers)
-    principal = build_principal(claims)
+    access_token = headers.get("authorization", "").removeprefix("Bearer ").strip()
+    claims = await api_client.verify_access_token(access_token=access_token)
+    principal = build_principal(claims, access_token=access_token)
 
     print(principal.sub)
     print(principal.scopes)

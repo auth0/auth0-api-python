@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import time
 
 import httpx
@@ -10,6 +11,7 @@ from conftest import (
     DISCOVERY_URL,
     JWKS_URL,
     TOKEN_ENDPOINT,
+    _TestTokenStore,
     assert_api_error,
     assert_form_post,
     assert_no_requests,
@@ -19,7 +21,7 @@ from conftest import (
 from freezegun import freeze_time
 from pytest_httpx import HTTPXMock
 
-from auth0_api_python import get_current_actor, get_delegation_chain
+from auth0_api_python import Principal, get_current_actor, get_delegation_chain
 from auth0_api_python.api_client import MAX_ARRAY_VALUES_PER_KEY, ApiClient
 from auth0_api_python.config import ApiClientOptions
 from auth0_api_python.errors import (
@@ -36,6 +38,7 @@ from auth0_api_python.errors import (
     OrganizationNotAllowedError,
     VerifyAccessTokenError,
 )
+from auth0_api_python.token_store import obo_cache_key, session_fingerprint
 from auth0_api_python.token_utils import (
     PRIVATE_EC_JWK,
     PRIVATE_JWK,
@@ -3261,6 +3264,379 @@ async def test_get_token_on_behalf_of_empty_access_token(api_client_confidential
             access_token="",
             audience="https://api.backend.com",
         )
+
+
+# ===== Token Storage Tests =====
+
+# ----- OBO -----
+
+_DEFAULT_OBO_TOKEN = "incoming-access-token"  # noqa: S105
+
+
+def _make_principal(
+    sub: str = "auth0|user1", org_id=None, access_token: str = _DEFAULT_OBO_TOKEN
+) -> Principal:
+    """Build a minimal Principal for OBO cache-key tests, bound to the given access_token."""
+    import hashlib
+
+    return Principal(
+        sub=sub,
+        expires_at=int(time.time()) + 3600,
+        scopes=[],
+        permissions=None,
+        client_id=None,
+        org_id=org_id,
+        token_fingerprint=hashlib.sha256(access_token.encode()).hexdigest(),
+    )
+
+
+class _RaisingGetTokenStore(_TestTokenStore):
+    """Token store whose get() always raises, to verify read failures fall back to a fresh exchange."""
+
+    async def get(self, key):
+        raise RuntimeError("store unavailable")
+
+
+class _RaisingSetTokenStore(_TestTokenStore):
+    """Token store whose set() always raises, to verify write failures don't fail the caller."""
+
+    async def set(self, key, value):
+        raise RuntimeError("store unavailable")
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_without_principal_always_fresh_exchange(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that omitting principal performs a fresh exchange on every call (backward compatible)."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-1"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-2"),
+    )
+
+    result1 = await api_client_confidential.get_token_on_behalf_of(
+        access_token="incoming-access-token",
+        audience="https://api.backend.com",
+    )
+    result2 = await api_client_confidential.get_token_on_behalf_of(
+        access_token="incoming-access-token",
+        audience="https://api.backend.com",
+    )
+
+    assert result1["access_token"] == "obo-access-token-1"
+    assert result2["access_token"] == "obo-access-token-2"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_with_principal_second_call_uses_cache(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that a second call with the same principal/audience/scope reuses the cached token."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token"),
+    )
+    principal = _make_principal()
+
+    result1 = await api_client_confidential.get_token_on_behalf_of(
+        access_token="incoming-access-token",
+        audience="https://api.backend.com",
+        scope="read:data",
+        principal=principal,
+    )
+    result2 = await api_client_confidential.get_token_on_behalf_of(
+        access_token="incoming-access-token",
+        audience="https://api.backend.com",
+        scope="read:data",
+        principal=principal,
+    )
+
+    assert result1["access_token"] == "obo-access-token"
+    assert result2["access_token"] == "obo-access-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_different_sub_does_not_share_cache(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that principals with different sub values each trigger their own exchange."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-1"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-2"),
+    )
+
+    await api_client_confidential.get_token_on_behalf_of(
+        access_token="incoming-access-token",
+        audience="https://api.backend.com",
+        principal=_make_principal(sub="auth0|user1"),
+    )
+    await api_client_confidential.get_token_on_behalf_of(
+        access_token="incoming-access-token",
+        audience="https://api.backend.com",
+        principal=_make_principal(sub="auth0|user2"),
+    )
+
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_different_org_id_does_not_share_cache(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that same-sub principals with different org_id each trigger their own exchange."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-1"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-2"),
+    )
+
+    await api_client_confidential.get_token_on_behalf_of(
+        access_token="incoming-access-token",
+        audience="https://api.backend.com",
+        principal=_make_principal(org_id="org_abc"),
+    )
+    await api_client_confidential.get_token_on_behalf_of(
+        access_token="incoming-access-token",
+        audience="https://api.backend.com",
+        principal=_make_principal(org_id="org_def"),
+    )
+
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_store_get_failure_falls_back_to_fresh_exchange(
+    mock_discovery, httpx_mock, caplog
+):
+    """Test that a token store whose get() raises still succeeds via a fresh exchange."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=_RaisingGetTokenStore(),
+    ))
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token"),
+    )
+
+    caplog.set_level(logging.WARNING)
+    result = await api_client.get_token_on_behalf_of(
+        access_token="incoming-access-token",
+        audience="https://api.backend.com",
+        principal=_make_principal(),
+    )
+
+    assert result["access_token"] == "obo-access-token"
+    assert any("Token store read failed" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_store_set_failure_still_returns_token(
+    mock_discovery, httpx_mock, caplog
+):
+    """Test that a token store whose set() raises still returns the exchanged token."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=_RaisingSetTokenStore(),
+    ))
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token"),
+    )
+
+    caplog.set_level(logging.WARNING)
+    result = await api_client.get_token_on_behalf_of(
+        access_token="incoming-access-token",
+        audience="https://api.backend.com",
+        principal=_make_principal(),
+    )
+
+    assert result["access_token"] == "obo-access-token"
+    assert any("Token store write failed" in record.message for record in caplog.records)
+
+
+class _ExpiredEntryTokenStore(_TestTokenStore):
+    """Token store whose get() always returns an expired TokenSet."""
+
+    async def get(self, key: str):
+        return {"access_token": "expired-token", "expires_at": int(time.time()) - 10}
+
+
+class _CorruptEntryTokenStore(_TestTokenStore):
+    """Token store whose get() returns a malformed entry missing required keys."""
+
+    async def get(self, key: str):
+        return {"not_a_token": "garbage"}
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_cache_hit_has_valid_expires_in(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that a cache hit returns expires_in > 0 and a future expires_at."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token"),
+    )
+    principal = _make_principal()
+
+    # First call — populate cache
+    await api_client_confidential.get_token_on_behalf_of(
+        access_token="incoming-access-token",
+        audience="https://api.backend.com",
+        scope="read:data",
+        principal=principal,
+    )
+    # Second call — cache hit
+    result = await api_client_confidential.get_token_on_behalf_of(
+        access_token="incoming-access-token",
+        audience="https://api.backend.com",
+        scope="read:data",
+        principal=principal,
+    )
+
+    assert result["expires_in"] > 0
+    assert "expires_at" in result
+    assert result["expires_at"] > int(time.time())
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_expired_store_entry_triggers_fresh_exchange(
+    mock_discovery, httpx_mock
+):
+    """Test that a store returning an already-expired entry always triggers a fresh exchange."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=_ExpiredEntryTokenStore(),
+    ))
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token-1"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token-2"),
+    )
+    principal = _make_principal()
+
+    await api_client.get_token_on_behalf_of(
+        access_token="incoming-access-token",
+        audience="https://api.backend.com",
+        principal=principal,
+    )
+    await api_client.get_token_on_behalf_of(
+        access_token="incoming-access-token",
+        audience="https://api.backend.com",
+        principal=principal,
+    )
+
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_corrupt_store_value_treated_as_cache_miss(
+    mock_discovery, httpx_mock
+):
+    """Test that a corrupt/partial store value is treated as a cache miss and a fresh exchange happens."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=_CorruptEntryTokenStore(),
+    ))
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token"),
+    )
+    principal = _make_principal()
+
+    result = await api_client.get_token_on_behalf_of(
+        access_token="incoming-access-token",
+        audience="https://api.backend.com",
+        principal=principal,
+    )
+
+    assert result["access_token"] == "fresh-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_expired_cache_entry_triggers_fresh_exchange(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that an expired cached entry is not returned and a fresh exchange happens."""
+    principal = _make_principal()
+    access_token = "incoming-access-token"
+    audience = "https://api.backend.com"
+
+    cache_key = obo_cache_key(
+        sub=principal.sub,
+        audience=audience,
+        org_id=principal.org_id,
+        scopes=None,
+        session_key=session_fingerprint(access_token),
+    )
+    await api_client_confidential._token_store.set(
+        cache_key,
+        {"access_token": "expired-access-token", "expires_at": int(time.time()) - 10},
+    )
+
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-obo-access-token"),
+    )
+
+    result = await api_client_confidential.get_token_on_behalf_of(
+        access_token=access_token,
+        audience=audience,
+        principal=principal,
+    )
+
+    assert result["access_token"] == "fresh-obo-access-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
 
 
 # ===== MCD (Multi-Custom Domain) Tests =====

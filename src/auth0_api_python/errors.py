@@ -174,3 +174,17 @@ class DomainsResolverError(BaseAuthError):
 
     def get_error_code(self) -> str:
         return "domains_resolver_error"
+
+
+class TokenStoreError(BaseAuthError):
+    """Raised when the configured TokenStore backend fails."""
+
+    def __init__(self, message: str, cause: Exception = None) -> None:
+        super().__init__(message)
+        self.cause = cause
+
+    def get_status_code(self) -> int:
+        return 500
+
+    def get_error_code(self) -> str:
+        return "token_store_error"

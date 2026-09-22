@@ -14,8 +14,10 @@ from .errors import (
     ConfigurationError,
     DomainsResolverError,
     GetTokenByExchangeProfileError,
+    TokenStoreError,
 )
 from .principal import Principal, build_principal
+from .token_store import AbstractTokenStore, TokenSet
 from .types import (
     DomainsResolver,
     DomainsResolverContext,
@@ -32,10 +34,13 @@ __all__ = [
     "DomainsResolverContext",
     "DomainsResolverError",
     "GetTokenByExchangeProfileError",
+    "TokenStoreError",
     "build_principal",
     "get_current_actor",
     "get_delegation_chain",
     "InMemoryCache",
+    "AbstractTokenStore",
     "OnBehalfOfTokenResult",
     "Principal",
+    "TokenSet",
 ]

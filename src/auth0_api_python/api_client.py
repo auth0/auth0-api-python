@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import logging
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional, Union
@@ -21,8 +23,11 @@ from .errors import (
     MissingOrganizationError,
     MissingRequiredArgumentError,
     OrganizationNotAllowedError,
+    TokenStoreError,
     VerifyAccessTokenError,
 )
+from .principal import Principal
+from .token_store import obo_cache_key, session_fingerprint
 from .types import OnBehalfOfTokenResult
 from .utils import (
     calculate_jwk_thumbprint,
@@ -49,7 +54,6 @@ RESERVED_PARAMS = frozenset([
     "resource_indicator", "scope", "connection", "login_hint",
     "organization", "assertion",
 ])
-
 
 class ApiClient:
     """
@@ -122,6 +126,8 @@ class ApiClient:
         else:
             self._discovery_cache = InMemoryCache(max_entries=options.cache_max_entries)
             self._jwks_cache = InMemoryCache(max_entries=options.cache_max_entries)
+
+        self._token_store = options.token_store
 
         self._cache_ttl = options.cache_ttl_seconds
 
@@ -999,6 +1005,7 @@ class ApiClient:
         access_token: str,
         audience: str,
         scope: Optional[str] = None,
+        principal: Optional[Principal] = None,
     ) -> OnBehalfOfTokenResult:
         """
         Exchange an Auth0 access token for another Auth0 access token targeting a downstream API
@@ -1011,6 +1018,10 @@ class ApiClient:
             access_token: The Auth0 access token to exchange
             audience: Target API identifier for the exchanged access token
             scope: Optional space-separated OAuth 2.0 scopes to request
+            principal: The verified caller identity, from build_principal(). When provided, the
+                exchanged token is cached and reused for the same caller, audience, organization,
+                scope set, and session, avoiding a redundant exchange on the next call. When
+                omitted, every call performs a fresh exchange and nothing is cached.
 
         Returns:
             Dictionary containing:
@@ -1028,6 +1039,40 @@ class ApiClient:
         """
         if not audience:
             raise MissingRequiredArgumentError("audience")
+
+        cache_key = None
+        if principal is not None and self._token_store is not None:
+            token_hash = hashlib.sha256(access_token.encode()).hexdigest()
+            if principal.token_fingerprint is None or principal.token_fingerprint != token_hash:
+                # Principal not bound to this token — skip cache to prevent cross-token pollution.
+                logging.warning(
+                    "Principal token fingerprint does not match access_token; skipping cache"
+                )
+            else:
+                cache_key = obo_cache_key(
+                    sub=principal.sub,
+                    audience=audience,
+                    org_id=principal.org_id,
+                    scopes=scope,
+                    session_key=session_fingerprint(access_token),
+                )
+
+            cached = None
+            try:
+                cached = await self._token_store.get(cache_key)
+            except Exception as exc:
+                store_err = TokenStoreError("Token store read failed", cause=exc)
+                logging.warning("Token store read failed, treating as cache miss: %s", store_err.cause)
+
+            if cached is not None:
+                if "access_token" not in cached or "expires_at" not in cached:
+                    logging.warning("Token store returned a malformed entry, treating as cache miss")
+                elif cached["expires_at"] > int(time.time()):
+                    return {
+                        "access_token": cached["access_token"],
+                        "expires_in": cached["expires_at"] - int(time.time()),
+                        "expires_at": cached["expires_at"],
+                    }
 
         result = await self.get_token_by_exchange_profile(
             subject_token=access_token,
@@ -1049,6 +1094,19 @@ class ApiClient:
             obo_result["token_type"] = result["token_type"]
         if "issued_token_type" in result:
             obo_result["issued_token_type"] = result["issued_token_type"]
+
+        if cache_key is not None:
+            try:
+                await self._token_store.set(
+                    cache_key,
+                    {
+                        "access_token": obo_result["access_token"],
+                        "expires_at": obo_result["expires_at"],
+                    },
+                )
+            except Exception as exc:
+                store_err = TokenStoreError("Token store write failed", cause=exc)
+                logging.warning("Token store write failed, token still returned: %s", store_err.cause)
 
         return obo_result
 
