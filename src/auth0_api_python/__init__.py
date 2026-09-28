@@ -17,7 +17,6 @@ from .errors import (
     GetTokenByExchangeProfileError,
     TokenStoreError,
 )
-from .principal import Principal, build_principal
 from .token_store import AbstractTokenStore, TokenSet, obo_cache_key, session_fingerprint
 from .types import (
     DomainsResolver,
@@ -38,7 +37,6 @@ __all__ = [
     "DownstreamApi",
     "GetTokenByExchangeProfileError",
     "TokenStoreError",
-    "build_principal",
     "get_current_actor",
     "get_delegation_chain",
     "InMemoryCache",
@@ -46,6 +44,5 @@ __all__ = [
     "obo_cache_key",
     "session_fingerprint",
     "OnBehalfOfTokenResult",
-    "Principal",
     "TokenSet",
 ]

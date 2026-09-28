@@ -96,8 +96,6 @@ asyncio.run(main())
 
 In this example, the returned dictionary contains the decoded claims (like `sub`, `scope`, etc.) from the verified token.
 
-You can also pass these claims to `build_principal()` to get a normalized `Principal` with the caller's subject, scopes, permissions, client ID, and organization already parsed out. See [EXAMPLES.md](./EXAMPLES.md#building-a-principal) for a full example.
-
 ### 4. Get an access token for a connection
 
 If you need to get an access token for an upstream idp via a connection, you can use the `get_access_token_for_connection` method:
@@ -253,10 +251,9 @@ token as the `subject_token` and relies on Auth0 to handle any DPoP-specific beh
 The OBO result only includes access-token-oriented fields. It does not expose `id_token` or
 `refresh_token`.
 
-Passing `principal` (from `build_principal()`) to `get_token_on_behalf_of()` caches the exchanged
-token, so a repeat call for the same caller, audience, organization, scopes, and session reuses it instead
-of exchanging again. Omitting `principal` performs a fresh exchange every time, matching the
-existing behavior above.
+Configuring a `token_store` on `ApiClientOptions` caches the exchanged token, so a repeat call for
+the same caller, audience, organization, scopes, and session reuses it instead of exchanging again.
+With no `token_store`, every call performs a fresh exchange, matching the existing behavior above.
 
 #### Inspecting Delegation After Token Verification
 

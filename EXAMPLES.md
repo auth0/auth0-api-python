@@ -89,40 +89,6 @@ result = await api_client.get_token_on_behalf_of(
 See the **[Token Storage Guide](docs/TokenStorage.md)** for a full working example, how to
 implement a Redis-backed store, and the built-in encryption helpers.
 
-## Building a Principal
-
-Use `build_principal()` to normalize a verified access token's claims into a `Principal`, so
-handler code can read the caller's identity, scopes, permissions, and organization without reaching
-into the raw claims dict.
-
-```python
-import asyncio
-
-from auth0_api_python import ApiClient, ApiClientOptions, build_principal
-
-async def build_caller_principal(headers):
-    api_client = ApiClient(ApiClientOptions(
-        domain="your-tenant.auth0.com",
-        audience="https://calendar-api.example.com"
-    ))
-
-    access_token = headers.get("authorization", "").removeprefix("Bearer ").strip()
-    claims = await api_client.verify_access_token(access_token=access_token)
-    principal = build_principal(claims)
-
-    print(principal.sub)
-    print(principal.scopes)
-    print(principal.permissions)
-    print(principal.client_id)
-    print(principal.org_id)
-
-    return principal
-
-# Example usage
-headers = {"authorization": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."}
-asyncio.run(build_caller_principal(headers))
-```
-
 ## Inspecting Delegation After Token Verification
 
 When a downstream API or `MCP` server receives an access token that may have been issued through
