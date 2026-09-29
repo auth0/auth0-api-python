@@ -89,6 +89,41 @@ result = await api_client.get_token_on_behalf_of(
 See the **[Token Storage Guide](docs/TokenStorage.md)** for a full working example, how to
 implement a Redis-backed store, and the built-in encryption helpers.
 
+## Client Credentials for Server-to-Server Calls
+
+Use `get_client_credentials_token()` to obtain an M2M access token for server-to-server calls
+using the OAuth 2.0 client credentials grant. The SDK authenticates via HTTP Basic and caches
+the result in the configured `token_store` (keyed by audience and scope set) so subsequent calls
+within the token's lifetime skip the network round-trip.
+
+```python
+import httpx
+
+from auth0_api_python import ApiClient, ApiClientOptions
+
+api_client = ApiClient(ApiClientOptions(
+    domain="your-tenant.auth0.com",
+    audience="https://mcp-server.example.com",
+    client_id="<AUTH0_CLIENT_ID>",
+    client_secret="<AUTH0_CLIENT_SECRET>",
+))
+
+result = await api_client.get_client_credentials_token(
+    audience="https://downstream-api.example.com",
+    scope="read:data",
+)
+
+# result always has "access_token", "expires_in", "expires_at".
+# "scope" is not guaranteed in the response and may be absent.
+async with httpx.AsyncClient() as client:
+    response = await client.get(
+        "https://downstream-api.example.com/data",
+        headers={"Authorization": f"Bearer {result['access_token']}"},
+    )
+```
+
+More info: [Client Credentials Flow](https://auth0.com/docs/get-started/authentication-and-authorization-flow/client-credentials-flow)
+
 ## Inspecting Delegation After Token Verification
 
 When a downstream API or `MCP` server receives an access token that may have been issued through
