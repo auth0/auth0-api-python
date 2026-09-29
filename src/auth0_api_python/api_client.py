@@ -7,6 +7,7 @@ from typing import Any, Optional, Union
 import httpx
 from authlib.jose import JsonWebKey, JsonWebToken
 
+from ._internal.cache_keys import m2m_cache_key
 from ._internal.obo_cache import OboCache
 from .cache import InMemoryCache
 from .config import ApiClientOptions
@@ -16,6 +17,7 @@ from .errors import (
     ConfigurationError,
     DomainsResolverError,
     GetAccessTokenForConnectionError,
+    GetClientCredentialsTokenError,
     GetTokenByExchangeProfileError,
     InvalidAuthSchemeError,
     InvalidDpopProofError,
@@ -23,13 +25,14 @@ from .errors import (
     MissingOrganizationError,
     MissingRequiredArgumentError,
     OrganizationNotAllowedError,
+    TokenStoreError,
     VerifyAccessTokenError,
 )
 from .token_store import (
     IndexedTokenStore,
     VerifiedToken,
 )
-from .types import OnBehalfOfTokenResult
+from .types import ClientCredentialsTokenResult, OnBehalfOfTokenResult
 from .utils import (
     calculate_jwk_thumbprint,
     fetch_jwks,
@@ -1122,6 +1125,148 @@ class ApiClient:
             await self._obo_cache.write(identity, audience, scope, obo_result)
 
         return obo_result
+
+    async def get_client_credentials_token(
+        self,
+        audience: str,
+        scope: Optional[str] = None,
+    ) -> ClientCredentialsTokenResult:
+        """
+        Obtain a client credentials (M2M) access token for a server-to-server call.
+
+        Args:
+            audience: Target API identifier for the access token
+            scope: Optional space-separated OAuth 2.0 scopes to request
+
+        Returns:
+            Dictionary containing:
+            - access_token (str): The access token
+            - expires_in (int): Token lifetime in seconds
+            - expires_at (int): Absolute expiration time as a Unix timestamp in seconds, calculated by the SDK from expires_in
+            - scope (str, optional): Granted scopes, if returned by Auth0
+            - token_type (str, optional): Token type, if returned by Auth0
+
+        Raises:
+            MissingRequiredArgumentError: If audience is not provided
+            GetClientCredentialsTokenError: If client credentials are not configured or token endpoint is missing
+            ApiError: If the token endpoint returns an error
+        """
+        if not audience:
+            raise MissingRequiredArgumentError("audience")
+
+        client_id = self.options.client_id
+        client_secret = self.options.client_secret
+        if not client_id or not client_secret:
+            raise GetClientCredentialsTokenError(
+                "Client credentials are required to use get_client_credentials_token. "
+                "Configure client_id and client_secret in ApiClientOptions to use this feature"
+            )
+
+        # Check cache before making a network call
+        cache_key = None
+        if self._token_store is not None:
+            cache_key = m2m_cache_key(tenant=self.options.domain, client_id=client_id, audience=audience, scopes=scope)
+
+            cached = None
+            try:
+                cached = await self._token_store.get(cache_key)
+            except Exception as exc:
+                store_err = TokenStoreError("Token store read failed", cause=exc)
+                logging.warning("Token store read failed, treating as cache miss: %s", store_err.cause)
+
+            if cached is not None:
+                if "access_token" not in cached or "expires_at" not in cached:
+                    logging.warning("Token store returned a malformed entry, treating as cache miss")
+                elif cached["expires_at"] > int(time.time()):
+                    return {
+                        "access_token": cached["access_token"],
+                        "expires_in": cached["expires_at"] - int(time.time()),
+                        "expires_at": cached["expires_at"],
+                    }
+
+        metadata = await self._discover()
+        token_endpoint = metadata.get("token_endpoint")
+        if not token_endpoint:
+            raise GetClientCredentialsTokenError(
+                "Token endpoint missing in OIDC metadata. "
+                "Verify your domain configuration and that the OIDC discovery endpoint is accessible"
+            )
+
+        params: dict[str, str] = {
+            "grant_type": "client_credentials",
+            "audience": audience,
+        }
+
+        if scope:
+            params["scope"] = scope
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(self.options.timeout)) as client:
+                response = await client.post(
+                    token_endpoint,
+                    data=params,
+                    auth=(client_id, client_secret)
+                )
+
+                if response.status_code != 200:
+                    error_data = {}
+                    try:
+                        content_type = response.headers.get("content-type", "").lower()
+                        if "json" in content_type:
+                            error_data = response.json()
+                    except ValueError:
+                        pass
+
+                    raise ApiError(
+                        error_data.get("error", "client_credentials_error"),
+                        error_data.get("error_description", "Failed to get client credentials token."),
+                        response.status_code
+                    )
+
+                token_response = response.json()
+
+                expires_in = token_response["expires_in"]
+                cc_result = {
+                    "access_token": token_response["access_token"],
+                    "expires_in": expires_in,
+                    "expires_at": int(time.time()) + expires_in,
+                }
+
+                # scope is not guaranteed in the client credentials response
+                if "scope" in token_response:
+                    cc_result["scope"] = token_response["scope"]
+                if "token_type" in token_response:
+                    cc_result["token_type"] = token_response["token_type"]
+
+        except httpx.TimeoutException as exc:
+            raise ApiError(
+                "timeout_error",
+                f"Request to token endpoint timed out: {str(exc)}",
+                504,
+                exc
+            )
+        except httpx.HTTPError as exc:
+            raise ApiError(
+                "network_error",
+                f"Network error occurred: {str(exc)}",
+                502,
+                exc
+            )
+
+        if cache_key is not None:
+            try:
+                await self._token_store.set(
+                    cache_key,
+                    {
+                        "access_token": cc_result["access_token"],
+                        "expires_at": cc_result["expires_at"],
+                    },
+                )
+            except Exception as exc:
+                store_err = TokenStoreError("Token store write failed", cause=exc)
+                logging.warning("Token store write failed, token still returned: %s", store_err.cause)
+
+        return cc_result
 
     # ===== Private Methods =====
 

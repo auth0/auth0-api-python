@@ -13,6 +13,7 @@ from .errors import (
     ApiError,
     ConfigurationError,
     DomainsResolverError,
+    GetClientCredentialsTokenError,
     GetTokenByExchangeProfileError,
     MissingOrganizationError,
     OrganizationNotAllowedError,
@@ -26,6 +27,7 @@ from .token_store import (
     VerifiedToken,
 )
 from .types import (
+    ClientCredentialsTokenResult,
     DomainsResolver,
     DomainsResolverContext,
     OnBehalfOfTokenResult,
@@ -36,10 +38,12 @@ __all__ = [
     "ApiClientOptions",
     "ApiError",
     "CacheAdapter",
+    "ClientCredentialsTokenResult",
     "ConfigurationError",
     "DomainsResolver",
     "DomainsResolverContext",
     "DomainsResolverError",
+    "GetClientCredentialsTokenError",
     "GetTokenByExchangeProfileError",
     "TokenStoreError",
     "get_current_actor",
