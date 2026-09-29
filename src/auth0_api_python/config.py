@@ -19,6 +19,7 @@ class ApiClientOptions:
                  Can be a static list of domain strings or a callable that returns
                  allowed domains dynamically. Optional if domain is provided.
         audience: The expected 'aud' claim in the token.
+        jwt_algorithms: Allowed access-token signing algorithms (default: ["RS256"]).
         custom_fetch: Optional callable that can replace the default HTTP fetch logic.
         cache_adapter: Custom cache implementation. If not provided, uses default InMemoryCache.
         cache_ttl_seconds: Time-to-live for cache entries in seconds (default: 600 = 10 minutes).
@@ -49,10 +50,12 @@ class ApiClientOptions:
             client_id: Optional[str] = None,
             client_secret: Optional[str] = None,
             timeout: float = 10.0,
+            jwt_algorithms: Optional[list[str]] = None,
     ):
         self.domain = domain
         self.domains = domains
         self.audience = audience
+        self.jwt_algorithms = ["RS256"] if jwt_algorithms is None else jwt_algorithms
         self.custom_fetch = custom_fetch
         self.cache_adapter = cache_adapter
         self.cache_ttl_seconds = cache_ttl_seconds

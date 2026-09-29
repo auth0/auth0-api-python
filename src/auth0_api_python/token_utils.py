@@ -2,7 +2,9 @@ import time
 import uuid
 from typing import Any, Optional, Union
 
-from authlib.jose import JsonWebKey, jwt
+from joserfc import jwk, jwt
+from joserfc.jws import JWSRegistry
+from joserfc.registry import HeaderParameter
 
 from .utils import calculate_jwk_thumbprint, normalize_url_for_htu, sha256_base64url
 
@@ -80,7 +82,7 @@ async def generate_token(
         token_claims["aud"] = audience
 
 
-    key = JsonWebKey.import_key(PRIVATE_JWK)
+    key = jwk.import_key(PRIVATE_JWK)
 
     header = {"alg": "RS256", "kid": PRIVATE_JWK["kid"]}
     token = jwt.encode(header, token_claims, key)
@@ -166,8 +168,15 @@ async def generate_dpop_proof(
     if header_overrides:
         header.update(header_overrides)
 
-    key = JsonWebKey.import_key(PRIVATE_EC_JWK)
-    token = jwt.encode(header, proof_claims, key)
+    key = jwk.import_key(PRIVATE_EC_JWK)
+    registry = JWSRegistry(
+        header_registry={
+            name: HeaderParameter("test override", lambda _: None)
+            for name in ("typ", "jwk")
+            if name in (header_overrides or {})
+        }
+    )
+    token = jwt.encode(header, proof_claims, key, registry=registry)
     # Ensure we return a string, not bytes
     return token.decode('utf-8') if isinstance(token, bytes) else token
 
