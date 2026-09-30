@@ -278,7 +278,7 @@ async def verify_dpop_token(access_token, dpop_proof, http_method, http_url):
 
 Anonymous Sessions give a visitor an Auth0 identity before they log in. The access token issued for an anonymous session is a standard Auth0 Bearer JWT, so this SDK validates it like any other token. The one difference is the `sub` claim, which starts with `anon@`.
 
-An anonymous token passes verification by default. To treat anonymous callers differently, or block them, check the `sub` claim after verifying the token. The SDK does not make that authorization decision for you.
+An anonymous token is verified like any other. It must be issued for this API's audience. To treat anonymous callers differently, or block them, check the `sub` claim after verifying the token. The SDK does not make that authorization decision for you.
 
 ### Serve everyone, branch in the handler
 
