@@ -409,7 +409,7 @@ For hybrid mode (migration scenarios), resolver patterns, error handling, and ca
 
 ### 8. Anonymous Sessions
 
-[Anonymous Sessions](https://auth0.com/docs) give a visitor an Auth0 identity before they log in. The access token issued for an anonymous session is a standard Auth0 Bearer JWT, so `verify_access_token()` and `verify_request()` validate it exactly like any other token. The only difference is the `sub` claim, which starts with `anon@`.
+[Anonymous Sessions](https://auth0.com/docs/manage-users/sessions/anonymous-sessions) give a visitor an Auth0 identity before they log in. The access token issued for an anonymous session is a standard Auth0 Bearer JWT, so `verify_access_token()` and `verify_request()` validate it exactly like any other token. The only difference is the `sub` claim, which starts with `anon@`.
 
 An anonymous token passes verification by default. Deciding whether an anonymous caller is authorized is your application's responsibility. See [Anonymous Callers](EXAMPLES.md#anonymous-callers) for allow, block-per-route, and block-globally patterns.
 
