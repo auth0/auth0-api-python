@@ -299,6 +299,9 @@ async def handle_cart(headers):
     return {"cart": load_user_cart(claims["sub"])}
 ```
 
+> [!NOTE]
+> These snippets construct `ApiClient` inside the handler for clarity. In production, build it once at startup and reuse it, or pass a shared `cache_adapter`, so JWKS and discovery caches persist across requests.
+
 ### Block anonymous callers on a specific route
 
 ```python
@@ -316,6 +319,9 @@ async def handle_checkout(headers):
 
     return {"order": create_order(claims["sub"])}
 ```
+
+> [!NOTE]
+> Blocking an anonymous caller should return an HTTP `403 Forbidden`. Replace `PermissionError` with your framework's error type.
 
 ### Block anonymous callers everywhere
 
@@ -338,9 +344,3 @@ async def require_logged_in_user(headers):
 
 > [!NOTE]
 > The `anon@` prefix on `sub` is the only signal that distinguishes an anonymous caller from a logged-in user.
-
-> [!NOTE]
-> These snippets construct `ApiClient` inside the handler for clarity. In production, build it once at startup and reuse it, or pass a shared `cache_adapter`, so JWKS and discovery caches persist across requests.
-
-> [!NOTE]
-> Blocking an anonymous caller should return an HTTP `403 Forbidden`. Replace `PermissionError` with your framework's error type.
