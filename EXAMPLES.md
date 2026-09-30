@@ -283,7 +283,6 @@ An anonymous token is verified like any other. It must be issued for this API's 
 ### Serve everyone, branch in the handler
 
 ```python
-import asyncio
 from auth0_api_python import ApiClient, ApiClientOptions
 
 async def handle_cart(headers):
@@ -303,6 +302,8 @@ async def handle_cart(headers):
 ### Block anonymous callers on a specific route
 
 ```python
+from auth0_api_python import ApiClient, ApiClientOptions
+
 async def handle_checkout(headers):
     api_client = ApiClient(ApiClientOptions(
         domain="your-tenant.auth0.com",
@@ -321,6 +322,8 @@ async def handle_checkout(headers):
 The SDK has no global "reject anonymous" switch. Centralize the check in whatever shared layer your framework uses for auth (middleware, a FastAPI dependency, a decorator).
 
 ```python
+from auth0_api_python import ApiClient, ApiClientOptions
+
 async def require_logged_in_user(headers):
     api_client = ApiClient(ApiClientOptions(
         domain="your-tenant.auth0.com",
