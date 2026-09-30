@@ -341,3 +341,6 @@ async def require_logged_in_user(headers):
 
 > [!NOTE]
 > These snippets construct `ApiClient` inside the handler for clarity. In production, build it once at startup and reuse it, or pass a shared `cache_adapter`, so JWKS and discovery caches persist across requests.
+
+> [!NOTE]
+> Blocking an anonymous caller should return an HTTP `403 Forbidden`. Replace `PermissionError` with your framework's error type.
