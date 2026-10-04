@@ -7,7 +7,6 @@ in server-side APIs, using Authlib for OIDC discovery and JWKS fetching.
 
 from .act import get_current_actor, get_delegation_chain
 from .api_client import ApiClient
-from .api_registry import ApiRegistry, DownstreamApi
 from .cache import CacheAdapter, InMemoryCache
 from .config import ApiClientOptions
 from .errors import (
@@ -36,14 +35,12 @@ __all__ = [
     "ApiClient",
     "ApiClientOptions",
     "ApiError",
-    "ApiRegistry",
     "CacheAdapter",
     "ClientCredentialsTokenResult",
     "ConfigurationError",
     "DomainsResolver",
     "DomainsResolverContext",
     "DomainsResolverError",
-    "DownstreamApi",
     "GetClientCredentialsTokenError",
     "GetTokenByExchangeProfileError",
     "TokenStoreError",
