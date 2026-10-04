@@ -37,8 +37,8 @@ async def exchange_on_behalf_of_cached(your_token_store):
 
     incoming_access_token = "incoming-auth0-access-token"
 
-    claims = await api_client.verify_access_token(access_token=incoming_access_token)
-
+    # With a store configured, the exchange verifies the incoming token itself, so there is
+    # no need to call verify_access_token separately here.
     result = await api_client.get_token_on_behalf_of(
         access_token=incoming_access_token,
         audience="https://calendar-api.example.com",
@@ -56,8 +56,8 @@ async def exchange_on_behalf_of_cached(your_token_store):
 ```
 
 The cached entry is scoped to the caller (`sub`), the target `audience`, the `org_id`, the
-requested scopes, and the session the incoming token belongs to. Different callers or sessions
-never share a cached token.
+scopes it was granted, and the session the incoming token belongs to. Different callers or
+sessions never share a cached token.
 
 ## Implementing a Token Store
 
@@ -118,3 +118,71 @@ generated on every write, so two encryptions of the same value produce different
 `secret` must be kept outside your codebase, for example in an environment variable or a secrets
 manager. Rotating it invalidates all existing cached entries, which is safe because the SDK falls
 back to a fresh exchange on any cache miss or decryption failure.
+
+## Matching cached tokens by scope
+
+By default the SDK only reuses a cached token when a later call asks for exactly the same scopes.
+This is the `strict` setting of `scope_matching` on `ApiClientOptions`, and it works with any
+store that implements `get`, `set`, and `delete`.
+
+Set `scope_matching="non_strict"` when a broader token should satisfy a narrower request. If an
+earlier exchange was granted `calendar:read calendar:write` and a later call only needs
+`calendar:read`, non_strict returns the cached token instead of exchanging again, because the
+granted scopes already cover what was asked for.
+
+To do that without one scope set evicting another, non_strict keeps every distinct token plus an
+index of the scopes each one was granted, so any cached token whose scopes cover the request can
+be reused. The index is maintained with an atomic add so that several server processes can write
+to it at once without losing each other's entries. A plain `AbstractTokenStore` cannot offer that,
+so non_strict requires a store that subclasses `IndexedTokenStore` and implements
+`add_index_member` and `list_index_members`. Using non_strict with a plain store raises
+`ConfigurationError` at construction.
+
+### Redis IndexedTokenStore example
+
+This extends the `RedisTokenStore` above and backs the index with a Redis hash, one field per
+token. Adding a member is a single `HSET`, which is atomic per field and overwrites any member
+stored under the same `token_key`.
+
+```python
+import json
+import time
+
+from auth0_api_python import IndexedTokenStore, TokenIndexMember
+
+
+class RedisIndexedTokenStore(RedisTokenStore, IndexedTokenStore):
+    async def add_index_member(self, index_key: str, member: TokenIndexMember) -> None:
+        await self.redis.hset(index_key, member["token_key"], json.dumps(member))
+
+    async def list_index_members(self, index_key: str) -> list[TokenIndexMember]:
+        raw = await self.redis.hgetall(index_key)
+        now = int(time.time())
+        live: list[TokenIndexMember] = []
+        expired_fields = []
+        for field, value in raw.items():
+            member = json.loads(value)
+            if member["expires_at"] > now:
+                live.append(member)
+            else:
+                expired_fields.append(field)
+        # Drop expired fields so the hash does not grow without bound as tokens age out.
+        if expired_fields:
+            await self.redis.hdel(index_key, *expired_fields)
+        return live
+
+
+# Usage
+api_client = ApiClient(ApiClientOptions(
+    domain="your-tenant.auth0.com",
+    audience="https://mcp-server.example.com",
+    client_id="<AUTH0_CLIENT_ID>",
+    client_secret="<AUTH0_CLIENT_SECRET>",
+    token_store=RedisIndexedTokenStore(redis_client, secret="<YOUR_ENCRYPTION_SECRET>"),
+    scope_matching="non_strict",
+))
+```
+
+An index member holds a hashed `token_key`, the granted scopes, and an expiry, never a bearer
+token, so it is not encrypted. The tokens themselves stay encrypted under their own keys as
+described above.

@@ -7,6 +7,8 @@ from typing import Any, Optional, Union
 import httpx
 from authlib.jose import JsonWebKey, JsonWebToken
 
+from ._internal.cache_keys import _normalized_scopes, is_covered_by, m2m_cache_key
+from ._internal.obo_cache import OboCache
 from .cache import InMemoryCache
 from .config import ApiClientOptions
 from .errors import (
@@ -26,7 +28,10 @@ from .errors import (
     TokenStoreError,
     VerifyAccessTokenError,
 )
-from .token_store import m2m_cache_key, obo_cache_key, session_fingerprint
+from .token_store import (
+    IndexedTokenStore,
+    VerifiedToken,
+)
 from .types import ClientCredentialsTokenResult, OnBehalfOfTokenResult
 from .utils import (
     calculate_jwk_thumbprint,
@@ -53,6 +58,7 @@ RESERVED_PARAMS = frozenset([
     "resource_indicator", "scope", "connection", "login_hint",
     "organization", "assertion",
 ])
+
 
 class ApiClient:
     """
@@ -118,6 +124,19 @@ class ApiClient:
             raise ConfigurationError(
                 "organization_id is only valid when organization_policy is 'required'"
             )
+        if options.scope_matching not in ("strict", "non_strict"):
+            raise ConfigurationError(
+                "scope_matching must be either 'strict' or 'non_strict'"
+            )
+        if (
+            options.scope_matching == "non_strict"
+            and options.token_store is not None
+            and not isinstance(options.token_store, IndexedTokenStore)
+        ):
+            raise ConfigurationError(
+                "scope_matching='non_strict' requires a token_store that subclasses IndexedTokenStore. "
+                "Use scope_matching='strict' or provide an IndexedTokenStore."
+            )
 
         if options.cache_adapter:
             self._discovery_cache = options.cache_adapter
@@ -127,6 +146,16 @@ class ApiClient:
             self._jwks_cache = InMemoryCache(max_entries=options.cache_max_entries)
 
         self._token_store = options.token_store
+        self._obo_cache = (
+            OboCache(
+                options.token_store,
+                exchange_tenant=options.domain or "",
+                exchange_client_id=options.client_id or "",
+                scope_matching=options.scope_matching,
+            )
+            if options.token_store is not None
+            else None
+        )
 
         self._cache_ttl = options.cache_ttl_seconds
 
@@ -1004,6 +1033,8 @@ class ApiClient:
         access_token: str,
         audience: str,
         scope: Optional[str] = None,
+        *,
+        verified: Optional[VerifiedToken] = None,
     ) -> OnBehalfOfTokenResult:
         """
         Exchange an Auth0 access token for another Auth0 access token targeting a downstream API
@@ -1016,6 +1047,9 @@ class ApiClient:
             access_token: The Auth0 access token to exchange
             audience: Target API identifier for the exchanged access token
             scope: Optional space-separated OAuth 2.0 scopes to request
+            verified: The already-verified token, supplied by a caller that has verified it (for
+                      example an MCP server). When omitted and a token_store is configured, the
+                      token is verified here before any cache lookup.
 
         Returns:
             Dictionary containing:
@@ -1026,56 +1060,37 @@ class ApiClient:
             - token_type (str, optional): Token type (typically "Bearer")
             - issued_token_type (str, optional): RFC 8693 issued token type identifier
 
-        Caching is enabled only when a token_store is configured on the client. The cache key
-        is derived from the token's subject, the audience, organization, requested scopes, and
-        session. No store means every call performs a fresh exchange and nothing is cached.
+        Caching is enabled only when a token_store is configured on the client. Without a store
+        every call performs a fresh exchange and nothing is cached. The scope_matching option
+        controls whether a cached token is reused only on an exact scope match ("strict") or
+        whenever its granted scopes cover the request ("non_strict").
 
         Raises:
             MissingRequiredArgumentError: If required parameters are missing
+            VerifyAccessTokenError: If a store is configured and either verified is omitted and the token fails verification, or verified is supplied but does not match the access token being exchanged
+            MissingOrganizationError: If organization_policy is "required" and the token has no org_id claim
+            OrganizationNotAllowedError: If the token's org_id is not in the organization_id allowlist
             GetTokenByExchangeProfileError: If client credentials are not configured or validation fails
             ApiError: If the token endpoint returns an error
         """
         if not audience:
             raise MissingRequiredArgumentError("audience")
 
-        cache_key = None
-        if self._token_store is not None:
-            sub = None
-            try:
-                payload = get_unverified_payload(access_token)
-                sub = payload.get("sub")
-            except ValueError:
-                logging.warning("Could not decode access token for cache key, skipping cache")
+        identity = None
+        if self._obo_cache is not None:
+            if verified is None:
+                claims = await self.verify_access_token(access_token)
+                verified = VerifiedToken(access_token=access_token, claims=claims)
+            elif verified.access_token != access_token:
+                # The cache identity comes from the verified claims, so those claims must belong
+                # to the token being exchanged or a caller could read back another token's entry.
+                raise VerifyAccessTokenError("verified token does not match the access token being exchanged")
+            identity = self._obo_cache.identity(verified)
 
-            if isinstance(sub, str) and sub:
-                org_id = payload.get("org_id") if isinstance(payload.get("org_id"), str) else None
-                cache_key = obo_cache_key(
-                    sub=sub,
-                    audience=audience,
-                    org_id=org_id,
-                    scopes=scope,
-                    session_key=session_fingerprint(access_token),
-                )
-            elif sub is not None:
-                logging.warning("Access token has no usable sub claim, skipping cache")
-
-            if cache_key is not None:
-                cached = None
-                try:
-                    cached = await self._token_store.get(cache_key)
-                except Exception as exc:
-                    store_err = TokenStoreError("Token store read failed", cause=exc)
-                    logging.warning("Token store read failed, treating as cache miss: %s", store_err.cause)
-
-                if cached is not None:
-                    if "access_token" not in cached or "expires_at" not in cached:
-                        logging.warning("Token store returned a malformed entry, treating as cache miss")
-                    elif cached["expires_at"] > int(time.time()):
-                        return {
-                            "access_token": cached["access_token"],
-                            "expires_in": cached["expires_at"] - int(time.time()),
-                            "expires_at": cached["expires_at"],
-                        }
+        if identity is not None:
+            hit = await self._obo_cache.lookup(identity, audience, scope)
+            if hit is not None:
+                return hit
 
         result = await self.get_token_by_exchange_profile(
             subject_token=access_token,
@@ -1098,18 +1113,8 @@ class ApiClient:
         if "issued_token_type" in result:
             obo_result["issued_token_type"] = result["issued_token_type"]
 
-        if cache_key is not None:
-            try:
-                await self._token_store.set(
-                    cache_key,
-                    {
-                        "access_token": obo_result["access_token"],
-                        "expires_at": obo_result["expires_at"],
-                    },
-                )
-            except Exception as exc:
-                store_err = TokenStoreError("Token store write failed", cause=exc)
-                logging.warning("Token store write failed, token still returned: %s", store_err.cause)
+        if identity is not None:
+            await self._obo_cache.write(identity, audience, scope, obo_result)
 
         return obo_result
 
@@ -1152,7 +1157,12 @@ class ApiClient:
         # Check cache before making a network call
         cache_key = None
         if self._token_store is not None:
-            cache_key = m2m_cache_key(audience=audience, scopes=scope)
+            cache_key = m2m_cache_key(
+                tenant=self.options.domain or "",
+                client_id=client_id,
+                audience=audience,
+                scopes=scope,
+            )
 
             cached = None
             try:
@@ -1164,12 +1174,17 @@ class ApiClient:
             if cached is not None:
                 if "access_token" not in cached or "expires_at" not in cached:
                     logging.warning("Token store returned a malformed entry, treating as cache miss")
-                elif cached["expires_at"] > int(time.time()):
-                    return {
+                # Auth0 may downscope, so confirm the cached grant still covers the request.
+                elif cached["expires_at"] > int(time.time()) and is_covered_by(scope, cached.get("granted_scopes")):
+                    hit: ClientCredentialsTokenResult = {
                         "access_token": cached["access_token"],
                         "expires_in": cached["expires_at"] - int(time.time()),
                         "expires_at": cached["expires_at"],
                     }
+                    granted = cached.get("granted_scopes")
+                    if granted:
+                        hit["scope"] = granted
+                    return hit
 
         metadata = await self._discover()
         token_endpoint = metadata.get("token_endpoint")
@@ -1242,11 +1257,14 @@ class ApiClient:
 
         if cache_key is not None:
             try:
+                # When Auth0 does not echo the granted scope, the requested scope is the best label available.
+                granted = _normalized_scopes(cc_result["scope"] if "scope" in cc_result else scope)
                 await self._token_store.set(
                     cache_key,
                     {
                         "access_token": cc_result["access_token"],
                         "expires_at": cc_result["expires_at"],
+                        "granted_scopes": granted,
                     },
                 )
             except Exception as exc:

@@ -3,21 +3,35 @@ Token storage for tokens the SDK itself mints (e.g. On Behalf Of exchanges),
 distinct from CacheAdapter which only caches OIDC discovery metadata and JWKS.
 """
 
-import hashlib
 from abc import ABC, abstractmethod
-from typing import Optional, TypedDict
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any, Optional, TypedDict
 
 from .encryption import decrypt, encrypt
-from .utils import get_unverified_payload
-
-_FIELD_SEPARATOR = "\x1f"
 
 
-class TokenSet(TypedDict):
-    """A minted access token and its absolute expiration, as stored by a TokenStore."""
-
+class _TokenSetRequired(TypedDict):
     access_token: str
     expires_at: int
+
+
+class TokenSet(_TokenSetRequired, total=False):
+    """A minted access token and its absolute expiration, as stored by a TokenStore."""
+
+    granted_scopes: str
+
+
+@dataclass(frozen=True)
+class VerifiedToken:
+    """An access token and the claims from verifying it.
+
+    The claims must come from verify_access_token, since they are trusted to build the
+    cache identity.
+    """
+
+    access_token: str
+    claims: Mapping[str, Any]
 
 
 class AbstractTokenStore(ABC):
@@ -75,56 +89,32 @@ class AbstractTokenStore(ABC):
         return decrypt(data, self._secret, key)
 
 
-def _normalized_scopes(scope: Optional[str]) -> str:
-    """Sort and dedupe scopes so equivalent scope strings produce the same cache key."""
-    if not scope:
-        return ""
-    return " ".join(sorted(set(scope.split())))
+class TokenIndexMember(TypedDict):
+    """One cached token listed in an index, with the scopes it was granted and when it expires."""
+
+    token_key: str
+    granted_scopes: str
+    expires_at: int
 
 
-def session_fingerprint(access_token: str) -> str:
+class IndexedTokenStore(AbstractTokenStore):
     """
-    Derive a session-scoped fingerprint for an access token, to keep concurrent
-    sessions' cached tokens from colliding. Not a trust or authorization signal:
-    the token is decoded without signature verification.
+    A token store that maintains a token index safely under concurrent writes and prunes it by expiry.
+
+    Needed for any cache layout that keeps several tokens per principal and reuses one whose
+    granted scopes cover a request. A plain AbstractTokenStore can only maintain such an index by
+    reading it, adding to it, and writing it back, which loses a concurrent addition made in
+    between. Implementations back the index with a structure that adds one member atomically and
+    drops members once they expire, for example a Redis sorted set scored by each member's
+    expiry. Adding a short-lived member must not shorten the whole index's lifetime.
     """
-    try:
-        payload = get_unverified_payload(access_token)
-    except ValueError:
-        return hashlib.sha256(access_token.encode()).hexdigest()
 
-    sid = payload.get("sid")
-    if isinstance(sid, str) and sid:
-        return sid
+    @abstractmethod
+    async def add_index_member(self, index_key: str, member: TokenIndexMember) -> None:
+        """Atomically add member to the index, replacing any member with the same token_key."""
+        ...
 
-    jti = payload.get("jti")
-    if isinstance(jti, str) and jti:
-        return jti
-
-    return hashlib.sha256(access_token.encode()).hexdigest()
-
-
-def obo_cache_key(
-    sub: str,
-    audience: str,
-    org_id: Optional[str],
-    scopes: Optional[str],
-    session_key: str,
-) -> str:
-    """Cache key for an On Behalf Of exchange, scoped to caller, audience, org, scopes, and session."""
-    fields = _FIELD_SEPARATOR.join(
-        ["obo", audience, org_id or "", _normalized_scopes(scopes), session_key]
-    )
-    return sub + ":" + hashlib.sha256(fields.encode()).hexdigest()
-
-
-def m2m_cache_key(audience: str, scopes: Optional[str]) -> str:
-    """Cache key for a client-credentials (M2M) exchange, scoped to audience and scopes."""
-    fields = _FIELD_SEPARATOR.join(["m2m", audience, _normalized_scopes(scopes)])
-    return hashlib.sha256(fields.encode()).hexdigest()
-
-
-def token_vault_cache_key(sub: str, connection: str) -> str:
-    """Cache key for a Token Vault exchange, scoped to caller and connection."""
-    fields = _FIELD_SEPARATOR.join(["token_vault", sub, connection])
-    return hashlib.sha256(fields.encode()).hexdigest()
+    @abstractmethod
+    async def list_index_members(self, index_key: str) -> list[TokenIndexMember]:
+        """Return the index members, possibly including expired ones, or [] if the index is absent."""
+        ...

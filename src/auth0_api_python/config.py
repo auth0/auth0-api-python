@@ -41,6 +41,11 @@ class ApiClientOptions:
         organization_id: Optional allowlist of org_id claim values (a single value or a list).
                           Only valid when organization_policy is "required" - passing it with
                           "allow" raises ConfigurationError at construction time.
+        scope_matching: OBO cache scope-matching mode, applied only when token_store is set.
+                        "strict" (default) reuses a cached token only on an exact granted-scope
+                        match. "non_strict" reuses any cached token whose granted scopes cover
+                        the request, and requires a token_store subclassing IndexedTokenStore
+                        (raises ConfigurationError at construction otherwise).
     """
     def __init__(
             self,
@@ -61,6 +66,7 @@ class ApiClientOptions:
             timeout: float = 10.0,
             organization_policy: str = "allow",
             organization_id: Optional[Union[str, list[str]]] = None,
+            scope_matching: str = "strict",
     ):
         self.domain = domain
         self.domains = domains
@@ -79,3 +85,4 @@ class ApiClientOptions:
         self.timeout = timeout
         self.organization_policy = organization_policy
         self.organization_id = organization_id
+        self.scope_matching = scope_matching

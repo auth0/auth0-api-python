@@ -10,10 +10,15 @@ from pytest_httpx import HTTPXMock
 
 from auth0_api_python import ApiClient, ApiClientOptions
 from auth0_api_python.errors import ApiError
-from auth0_api_python.token_store import AbstractTokenStore, TokenSet
+from auth0_api_python.token_store import (
+    AbstractTokenStore,
+    IndexedTokenStore,
+    TokenIndexMember,
+    TokenSet,
+)
 
 
-class _TestTokenStore(AbstractTokenStore):
+class InMemoryTokenStore(AbstractTokenStore):
     """Minimal in-memory store for tests. Not for production use."""
 
     def __init__(self, *, secret: str = "test-secret") -> None:  # noqa: S107
@@ -35,6 +40,20 @@ class _TestTokenStore(AbstractTokenStore):
     async def delete(self, key: str) -> None:
         self._store.pop(key, None)
 
+
+class InMemoryIndexedTokenStore(InMemoryTokenStore, IndexedTokenStore):
+    """In-memory IndexedTokenStore for tests. Not for production use."""
+
+    def __init__(self, *, secret: str = "test-secret") -> None:  # noqa: S107
+        super().__init__(secret=secret)
+        self._index: dict[str, dict[str, TokenIndexMember]] = {}
+
+    async def add_index_member(self, index_key: str, member: TokenIndexMember) -> None:
+        self._index.setdefault(index_key, {})[member["token_key"]] = member
+
+    async def list_index_members(self, index_key: str) -> list[TokenIndexMember]:
+        return list(self._index.get(index_key, {}).values())
+
 # ===== Constants =====
 
 DISCOVERY_URL = "https://auth0.local/.well-known/openid-configuration"
@@ -51,7 +70,18 @@ def api_client_confidential():
         audience="my-audience",
         client_id="cid",
         client_secret="csecret",
-        token_store=_TestTokenStore(),
+        token_store=InMemoryTokenStore(),
+    ))
+
+
+@pytest.fixture
+def api_client_confidential_no_store():
+    """Confidential client without a token_store, so OBO exchanges never cache or verify."""
+    return ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
     ))
 
 

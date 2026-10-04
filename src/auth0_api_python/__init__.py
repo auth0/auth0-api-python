@@ -20,10 +20,10 @@ from .errors import (
 )
 from .token_store import (
     AbstractTokenStore,
+    IndexedTokenStore,
+    TokenIndexMember,
     TokenSet,
-    m2m_cache_key,
-    obo_cache_key,
-    session_fingerprint,
+    VerifiedToken,
 )
 from .types import (
     ClientCredentialsTokenResult,
@@ -51,9 +51,9 @@ __all__ = [
     "get_delegation_chain",
     "InMemoryCache",
     "AbstractTokenStore",
-    "m2m_cache_key",
-    "obo_cache_key",
-    "session_fingerprint",
+    "IndexedTokenStore",
+    "TokenIndexMember",
+    "VerifiedToken",
     "OnBehalfOfTokenResult",
     "TokenSet",
 ]

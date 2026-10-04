@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import logging
@@ -11,7 +12,8 @@ from conftest import (
     DISCOVERY_URL,
     JWKS_URL,
     TOKEN_ENDPOINT,
-    _TestTokenStore,
+    InMemoryIndexedTokenStore,
+    InMemoryTokenStore,
     assert_api_error,
     assert_form_post,
     assert_no_requests,
@@ -22,6 +24,12 @@ from freezegun import freeze_time
 from pytest_httpx import HTTPXMock
 
 from auth0_api_python import get_current_actor, get_delegation_chain
+from auth0_api_python._internal.cache_keys import (
+    index_cache_key,
+    m2m_cache_key,
+    obo_cache_key,
+    session_fingerprint,
+)
 from auth0_api_python.api_client import MAX_ARRAY_VALUES_PER_KEY, ApiClient
 from auth0_api_python.config import ApiClientOptions
 from auth0_api_python.errors import (
@@ -39,7 +47,7 @@ from auth0_api_python.errors import (
     OrganizationNotAllowedError,
     VerifyAccessTokenError,
 )
-from auth0_api_python.token_store import m2m_cache_key, obo_cache_key, session_fingerprint
+from auth0_api_python.token_store import VerifiedToken
 from auth0_api_python.token_utils import (
     PRIVATE_EC_JWK,
     PRIVATE_JWK,
@@ -3093,7 +3101,7 @@ async def test_get_token_on_behalf_of_missing_audience(api_client_confidential):
 
 
 @pytest.mark.asyncio
-async def test_get_token_on_behalf_of_success(mock_discovery, api_client_confidential, httpx_mock):
+async def test_get_token_on_behalf_of_success(mock_discovery, api_client_confidential_no_store, httpx_mock):
     """Test successful OBO exchange with fixed access-token types."""
     httpx_mock.add_response(
         method="POST",
@@ -3107,7 +3115,7 @@ async def test_get_token_on_behalf_of_success(mock_discovery, api_client_confide
         }
     )
 
-    result = await api_client_confidential.get_token_on_behalf_of(
+    result = await api_client_confidential_no_store.get_token_on_behalf_of(
         access_token="incoming-access-token",
         audience="https://api.backend.com",
         scope="read:data write:data"
@@ -3137,12 +3145,12 @@ async def test_get_token_on_behalf_of_success(mock_discovery, api_client_confide
 
 @pytest.mark.asyncio
 async def test_get_token_on_behalf_of_preserves_inferred_expires_at(
-    api_client_confidential,
+    api_client_confidential_no_store,
     monkeypatch,
 ):
     """Test that OBO reuses the expires_at inferred by the generic exchange path."""
 
-    async def fake_exchange_profile(
+    async def stub_exchange_profile(
         *,
         subject_token,
         subject_token_type,
@@ -3167,12 +3175,12 @@ async def test_get_token_on_behalf_of_preserves_inferred_expires_at(
         }
 
     monkeypatch.setattr(
-        api_client_confidential,
+        api_client_confidential_no_store,
         "get_token_by_exchange_profile",
-        fake_exchange_profile,
+        stub_exchange_profile,
     )
 
-    result = await api_client_confidential.get_token_on_behalf_of(
+    result = await api_client_confidential_no_store.get_token_on_behalf_of(
         access_token="incoming-access-token",
         audience="https://api.backend.com",
     )
@@ -3185,7 +3193,7 @@ async def test_get_token_on_behalf_of_preserves_inferred_expires_at(
 
 
 @pytest.mark.asyncio
-async def test_get_token_on_behalf_of_without_scope(mock_discovery, api_client_confidential, httpx_mock):
+async def test_get_token_on_behalf_of_without_scope(mock_discovery, api_client_confidential_no_store, httpx_mock):
     """Test OBO exchange omits scope when not provided."""
     httpx_mock.add_response(
         method="POST",
@@ -3197,7 +3205,7 @@ async def test_get_token_on_behalf_of_without_scope(mock_discovery, api_client_c
         )
     )
 
-    result = await api_client_confidential.get_token_on_behalf_of(
+    result = await api_client_confidential_no_store.get_token_on_behalf_of(
         access_token="incoming-access-token",
         audience="https://api.backend.com",
     )
@@ -3208,7 +3216,7 @@ async def test_get_token_on_behalf_of_without_scope(mock_discovery, api_client_c
 
 @pytest.mark.asyncio
 async def test_get_token_on_behalf_of_does_not_expose_id_or_refresh_token(
-    mock_discovery, api_client_confidential, httpx_mock
+    mock_discovery, api_client_confidential_no_store, httpx_mock
 ):
     """Test OBO result only exposes access-token-oriented fields."""
     httpx_mock.add_response(
@@ -3224,7 +3232,7 @@ async def test_get_token_on_behalf_of_does_not_expose_id_or_refresh_token(
         }
     )
 
-    result = await api_client_confidential.get_token_on_behalf_of(
+    result = await api_client_confidential_no_store.get_token_on_behalf_of(
         access_token="incoming-access-token",
         audience="https://api.backend.com",
     )
@@ -3235,7 +3243,7 @@ async def test_get_token_on_behalf_of_does_not_expose_id_or_refresh_token(
 
 
 @pytest.mark.asyncio
-async def test_get_token_on_behalf_of_api_error(mock_discovery, api_client_confidential, httpx_mock):
+async def test_get_token_on_behalf_of_api_error(mock_discovery, api_client_confidential_no_store, httpx_mock):
     """Test that OBO reuses the existing exchange error semantics."""
     httpx_mock.add_response(
         method="POST",
@@ -3248,7 +3256,7 @@ async def test_get_token_on_behalf_of_api_error(mock_discovery, api_client_confi
     )
 
     with pytest.raises(ApiError) as err:
-        await api_client_confidential.get_token_on_behalf_of(
+        await api_client_confidential_no_store.get_token_on_behalf_of(
             access_token="incoming-access-token",
             audience="https://api.backend.com",
         )
@@ -3416,15 +3424,66 @@ async def test_get_client_credentials_token_network_error(
 
 # ----- OBO -----
 
+# The confidential fixture's verified identity: issuer, exchange tenant, and exchange client.
+CONFIDENTIAL_ISS = "https://auth0.local/"
+CONFIDENTIAL_TENANT = "auth0.local"
+CONFIDENTIAL_CID = "cid"
 
-class _RaisingGetTokenStore(_TestTokenStore):
+
+def make_access_token(sub: str = "auth0|user1", *, org_id: str = None) -> str:
+    """Build a minimal stub JWT-shaped token carrying the given sub and optional org_id."""
+    claims = {"sub": sub}
+    if org_id is not None:
+        claims["org_id"] = org_id
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
+    return f"hdr.{payload}.sig"
+
+
+def verified_for(access_token, sub="auth0|user1", *, org_id=None, iss=CONFIDENTIAL_ISS):
+    """Build the VerifiedToken an MCP server would pass, so the client skips its own verify."""
+    claims = {"sub": sub, "iss": iss}
+    if org_id is not None:
+        claims["org_id"] = org_id
+    return VerifiedToken(access_token=access_token, claims=claims)
+
+
+def strict_key(access_token, *, audience, scopes, sub="auth0|user1", org_id=None, iss=CONFIDENTIAL_ISS):
+    """The strict-layout token key OboCache computes for the confidential fixture's identity."""
+    return obo_cache_key(
+        layout="strict", sub=sub, issuer=iss, incoming_client_id="",
+        exchange_tenant=CONFIDENTIAL_TENANT, exchange_client_id=CONFIDENTIAL_CID,
+        audience=audience, org_id=org_id, scopes=scopes,
+        session_key=session_fingerprint(access_token),
+    )
+
+
+def index_key(access_token, *, audience, sub="auth0|user1", org_id=None, iss=CONFIDENTIAL_ISS):
+    """The index key OboCache computes for the confidential fixture's identity."""
+    return index_cache_key(
+        sub=sub, issuer=iss, incoming_client_id="",
+        exchange_tenant=CONFIDENTIAL_TENANT, exchange_client_id=CONFIDENTIAL_CID,
+        audience=audience, org_id=org_id, session_key=session_fingerprint(access_token),
+    )
+
+
+def index_token_key(access_token, *, audience, scopes, sub="auth0|user1", org_id=None, iss=CONFIDENTIAL_ISS):
+    """The index-layout token key OboCache computes for the confidential fixture's identity."""
+    return obo_cache_key(
+        layout="index", sub=sub, issuer=iss, incoming_client_id="",
+        exchange_tenant=CONFIDENTIAL_TENANT, exchange_client_id=CONFIDENTIAL_CID,
+        audience=audience, org_id=org_id, scopes=scopes,
+        session_key=session_fingerprint(access_token),
+    )
+
+
+class RaisingGetTokenStore(InMemoryTokenStore):
     """Token store whose get() always raises, to verify read failures fall back to a fresh exchange."""
 
     async def get(self, key):
         raise RuntimeError("store unavailable")
 
 
-class _RaisingSetTokenStore(_TestTokenStore):
+class RaisingSetTokenStore(InMemoryTokenStore):
     """Token store whose set() always raises, to verify write failures don't fail the caller."""
 
     async def set(self, key, value):
@@ -3475,17 +3534,19 @@ async def test_get_token_on_behalf_of_with_token_store_cache_miss_then_hit(
         json=token_success(access_token="obo-access-token"),
     )
 
-    payload = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1"}).encode()).rstrip(b"=").decode()
-    token = f"hdr.{payload}.sig"
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
     result1 = await api_client_confidential.get_token_on_behalf_of(
         access_token=token,
         audience="https://api.backend.com",
         scope="read:data",
+        verified=verified,
     )
     result2 = await api_client_confidential.get_token_on_behalf_of(
         access_token=token,
         audience="https://api.backend.com",
         scope="read:data",
+        verified=verified,
     )
 
     assert result1["access_token"] == "obo-access-token"
@@ -3495,10 +3556,50 @@ async def test_get_token_on_behalf_of_with_token_store_cache_miss_then_hit(
 
 
 @pytest.mark.asyncio
-async def test_get_token_on_behalf_of_undecodable_token_skips_caching(
+async def test_get_token_on_behalf_of_unverifiable_raw_token_raises(
+    api_client_confidential, httpx_mock
+):
+    """With a store and no verified context, an unverifiable raw token raises before any exchange."""
+    with pytest.raises(VerifyAccessTokenError):
+        await api_client_confidential.get_token_on_behalf_of(
+            access_token="not-a-jwt",
+            audience="https://api.backend.com",
+        )
+
+    assert not [r for r in httpx_mock.get_requests() if r.method == "POST"]
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_verified_context_skips_reverification(
+    mock_discovery, api_client_confidential, httpx_mock, monkeypatch
+):
+    """A supplied verified context is trusted, so the client does not verify the token itself."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token"),
+    )
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("verify_access_token must not be called when verified is supplied")
+
+    monkeypatch.setattr(api_client_confidential, "verify_access_token", fail_if_called)
+
+    token = make_access_token("auth0|user1")
+    result = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token,
+        audience="https://api.backend.com",
+        verified=verified_for(token, "auth0|user1"),
+    )
+
+    assert result["access_token"] == "obo-access-token"
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_verified_claims_without_sub_skips_caching(
     mock_discovery, api_client_confidential, httpx_mock, caplog
 ):
-    """Test that a non-JWT access_token causes caching to be skipped with a warning."""
+    """Verified claims that lack a usable sub skip caching with a warning, so each call re-exchanges."""
     httpx_mock.add_response(
         method="POST",
         url=TOKEN_ENDPOINT,
@@ -3511,20 +3612,39 @@ async def test_get_token_on_behalf_of_undecodable_token_skips_caching(
     )
 
     caplog.set_level(logging.WARNING)
+    token = make_access_token("auth0|user1")
+    no_sub = VerifiedToken(access_token=token, claims={"iss": CONFIDENTIAL_ISS})
     result1 = await api_client_confidential.get_token_on_behalf_of(
-        access_token="not-a-jwt",
-        audience="https://api.backend.com",
+        access_token=token, audience="https://api.backend.com", verified=no_sub
     )
     result2 = await api_client_confidential.get_token_on_behalf_of(
-        access_token="not-a-jwt",
-        audience="https://api.backend.com",
+        access_token=token, audience="https://api.backend.com", verified=no_sub
     )
 
     assert result1["access_token"] == "obo-access-token-1"
     assert result2["access_token"] == "obo-access-token-2"
     token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
     assert len(token_requests) == 2
-    assert any("Could not decode" in record.message for record in caplog.records)
+    assert any("no usable sub" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_verified_token_mismatch_raises(
+    api_client_confidential, httpx_mock
+):
+    """A verified token whose access_token differs from the one being exchanged is rejected."""
+    token = make_access_token("auth0|user1")
+    other = make_access_token("auth0|user2")
+
+    with pytest.raises(VerifyAccessTokenError):
+        await api_client_confidential.get_token_on_behalf_of(
+            access_token=token,
+            audience="https://api.backend.com",
+            verified=verified_for(other, "auth0|user2"),
+        )
+
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 0
 
 
 @pytest.mark.asyncio
@@ -3543,16 +3663,14 @@ async def test_get_token_on_behalf_of_different_sub_does_not_share_cache(
         json=token_success(access_token="obo-access-token-2"),
     )
 
-    payload1 = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1"}).encode()).rstrip(b"=").decode()
-    token1 = f"hdr.{payload1}.sig"
-    payload2 = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user2"}).encode()).rstrip(b"=").decode()
-    token2 = f"hdr.{payload2}.sig"
+    token1 = make_access_token("auth0|user1")
+    token2 = make_access_token("auth0|user2")
 
     await api_client_confidential.get_token_on_behalf_of(
-        access_token=token1, audience="https://api.backend.com"
+        access_token=token1, audience="https://api.backend.com", verified=verified_for(token1, "auth0|user1")
     )
     await api_client_confidential.get_token_on_behalf_of(
-        access_token=token2, audience="https://api.backend.com"
+        access_token=token2, audience="https://api.backend.com", verified=verified_for(token2, "auth0|user2")
     )
 
     token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
@@ -3575,16 +3693,16 @@ async def test_get_token_on_behalf_of_different_org_id_does_not_share_cache(
         json=token_success(access_token="obo-access-token-2"),
     )
 
-    payload1 = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1", "org_id": "org_abc"}).encode()).rstrip(b"=").decode()
-    token1 = f"hdr.{payload1}.sig"
-    payload2 = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1", "org_id": "org_def"}).encode()).rstrip(b"=").decode()
-    token2 = f"hdr.{payload2}.sig"
+    token1 = make_access_token("auth0|user1", org_id="org_abc")
+    token2 = make_access_token("auth0|user1", org_id="org_def")
 
     await api_client_confidential.get_token_on_behalf_of(
-        access_token=token1, audience="https://api.backend.com"
+        access_token=token1, audience="https://api.backend.com",
+        verified=verified_for(token1, "auth0|user1", org_id="org_abc"),
     )
     await api_client_confidential.get_token_on_behalf_of(
-        access_token=token2, audience="https://api.backend.com"
+        access_token=token2, audience="https://api.backend.com",
+        verified=verified_for(token2, "auth0|user1", org_id="org_def"),
     )
 
     token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
@@ -3601,7 +3719,7 @@ async def test_get_token_on_behalf_of_store_get_failure_falls_back_to_fresh_exch
         audience="my-audience",
         client_id="cid",
         client_secret="csecret",
-        token_store=_RaisingGetTokenStore(),
+        token_store=RaisingGetTokenStore(),
     ))
     httpx_mock.add_response(
         method="POST",
@@ -3609,12 +3727,12 @@ async def test_get_token_on_behalf_of_store_get_failure_falls_back_to_fresh_exch
         json=token_success(access_token="obo-access-token"),
     )
 
-    payload = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1"}).encode()).rstrip(b"=").decode()
-    token = f"hdr.{payload}.sig"
+    token = make_access_token("auth0|user1")
     caplog.set_level(logging.WARNING)
     result = await api_client.get_token_on_behalf_of(
         access_token=token,
         audience="https://api.backend.com",
+        verified=verified_for(token, "auth0|user1"),
     )
 
     assert result["access_token"] == "obo-access-token"
@@ -3631,7 +3749,7 @@ async def test_get_token_on_behalf_of_store_set_failure_still_returns_token(
         audience="my-audience",
         client_id="cid",
         client_secret="csecret",
-        token_store=_RaisingSetTokenStore(),
+        token_store=RaisingSetTokenStore(),
     ))
     httpx_mock.add_response(
         method="POST",
@@ -3639,26 +3757,26 @@ async def test_get_token_on_behalf_of_store_set_failure_still_returns_token(
         json=token_success(access_token="obo-access-token"),
     )
 
-    payload = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1"}).encode()).rstrip(b"=").decode()
-    token = f"hdr.{payload}.sig"
+    token = make_access_token("auth0|user1")
     caplog.set_level(logging.WARNING)
     result = await api_client.get_token_on_behalf_of(
         access_token=token,
         audience="https://api.backend.com",
+        verified=verified_for(token, "auth0|user1"),
     )
 
     assert result["access_token"] == "obo-access-token"
     assert any("Token store write failed" in record.message for record in caplog.records)
 
 
-class _ExpiredEntryTokenStore(_TestTokenStore):
+class ExpiredEntryTokenStore(InMemoryTokenStore):
     """Token store whose get() always returns an expired TokenSet."""
 
     async def get(self, key: str):
         return {"access_token": "expired-token", "expires_at": int(time.time()) - 10}
 
 
-class _CorruptEntryTokenStore(_TestTokenStore):
+class CorruptEntryTokenStore(InMemoryTokenStore):
     """Token store whose get() returns a malformed entry missing required keys."""
 
     async def get(self, key: str):
@@ -3676,20 +3794,22 @@ async def test_get_token_on_behalf_of_cache_hit_has_valid_expires_in(
         json=token_success(access_token="obo-access-token"),
     )
 
-    payload = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1"}).encode()).rstrip(b"=").decode()
-    token = f"hdr.{payload}.sig"
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
 
     # First call — populate cache
     await api_client_confidential.get_token_on_behalf_of(
         access_token=token,
         audience="https://api.backend.com",
         scope="read:data",
+        verified=verified,
     )
     # Second call — cache hit
     result = await api_client_confidential.get_token_on_behalf_of(
         access_token=token,
         audience="https://api.backend.com",
         scope="read:data",
+        verified=verified,
     )
 
     assert result["expires_in"] > 0
@@ -3707,7 +3827,7 @@ async def test_get_token_on_behalf_of_expired_store_entry_triggers_fresh_exchang
         audience="my-audience",
         client_id="cid",
         client_secret="csecret",
-        token_store=_ExpiredEntryTokenStore(),
+        token_store=ExpiredEntryTokenStore(),
     ))
     httpx_mock.add_response(
         method="POST",
@@ -3720,11 +3840,11 @@ async def test_get_token_on_behalf_of_expired_store_entry_triggers_fresh_exchang
         json=token_success(access_token="fresh-token-2"),
     )
 
-    payload = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1"}).encode()).rstrip(b"=").decode()
-    token = f"hdr.{payload}.sig"
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
 
-    await api_client.get_token_on_behalf_of(access_token=token, audience="https://api.backend.com")
-    await api_client.get_token_on_behalf_of(access_token=token, audience="https://api.backend.com")
+    await api_client.get_token_on_behalf_of(access_token=token, audience="https://api.backend.com", verified=verified)
+    await api_client.get_token_on_behalf_of(access_token=token, audience="https://api.backend.com", verified=verified)
 
     token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
     assert len(token_requests) == 2
@@ -3740,7 +3860,7 @@ async def test_get_token_on_behalf_of_corrupt_store_value_treated_as_cache_miss(
         audience="my-audience",
         client_id="cid",
         client_secret="csecret",
-        token_store=_CorruptEntryTokenStore(),
+        token_store=CorruptEntryTokenStore(),
     ))
     httpx_mock.add_response(
         method="POST",
@@ -3748,11 +3868,11 @@ async def test_get_token_on_behalf_of_corrupt_store_value_treated_as_cache_miss(
         json=token_success(access_token="fresh-token"),
     )
 
-    payload = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1"}).encode()).rstrip(b"=").decode()
-    token = f"hdr.{payload}.sig"
+    token = make_access_token("auth0|user1")
     result = await api_client.get_token_on_behalf_of(
         access_token=token,
         audience="https://api.backend.com",
+        verified=verified_for(token, "auth0|user1"),
     )
 
     assert result["access_token"] == "fresh-token"
@@ -3766,16 +3886,9 @@ async def test_get_token_on_behalf_of_expired_cache_entry_triggers_fresh_exchang
 ):
     """Test that an expired cached entry is not returned and a fresh exchange happens."""
     audience = "https://api.backend.com"
-    payload = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1"}).encode()).rstrip(b"=").decode()
-    access_token = f"hdr.{payload}.sig"
+    access_token = make_access_token("auth0|user1")
 
-    cache_key = obo_cache_key(
-        sub="auth0|user1",
-        audience=audience,
-        org_id=None,
-        scopes=None,
-        session_key=session_fingerprint(access_token),
-    )
+    cache_key = strict_key(access_token, audience=audience, scopes=None)
     await api_client_confidential._token_store.set(
         cache_key,
         {"access_token": "expired-access-token", "expires_at": int(time.time()) - 10},
@@ -3790,11 +3903,524 @@ async def test_get_token_on_behalf_of_expired_cache_entry_triggers_fresh_exchang
     result = await api_client_confidential.get_token_on_behalf_of(
         access_token=access_token,
         audience=audience,
+        verified=verified_for(access_token, "auth0|user1"),
     )
 
     assert result["access_token"] == "fresh-obo-access-token"
     token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
     assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_strict_downscoped_cached_under_granted_scope(mock_discovery, api_client_confidential, httpx_mock):
+    """strict downscoping: a grant narrower than the request is reusable only for the granted subset."""
+    audience = "https://api.backend.com"
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="narrow-token", scope="read:x"))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="wide-token", scope="read:x write:x"))
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    # Request read:x write:x, Auth0 downscopes to read:x (fresh downscoping).
+    r1 = await api_client_confidential.get_token_on_behalf_of(access_token=token, audience=audience, scope="read:x write:x", verified=verified)
+    # The granted subset is a hit (cached downscoping).
+    r2 = await api_client_confidential.get_token_on_behalf_of(access_token=token, audience=audience, scope="read:x", verified=verified)
+    # Re-requesting the wider scope is a miss under strict, so a fresh exchange runs.
+    r3 = await api_client_confidential.get_token_on_behalf_of(access_token=token, audience=audience, scope="read:x write:x", verified=verified)
+
+    assert r1["access_token"] == "narrow-token"
+    assert r2["access_token"] == "narrow-token"
+    assert r3["access_token"] == "wide-token"
+    posts = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(posts) == 2
+
+
+@pytest.mark.asyncio
+async def test_obo_different_issuer_does_not_share_cache(mock_discovery, api_client_confidential, httpx_mock):
+    """A cached token is not reused when the verified issuer differs, even for the same subject and token."""
+    audience = "https://api.backend.com"
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="issuer-a-token"))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="issuer-b-token"))
+
+    token = make_access_token("auth0|user1")
+    r1 = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token, audience=audience, verified=verified_for(token, "auth0|user1", iss="https://issuer-a/"))
+    r2 = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token, audience=audience, verified=verified_for(token, "auth0|user1", iss="https://issuer-b/"))
+
+    assert r1["access_token"] == "issuer-a-token"
+    assert r2["access_token"] == "issuer-b-token"
+    posts = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(posts) == 2
+
+
+# ----- OBO non_strict -----
+
+def _nss_client(token_store=None):
+    """Build a confidential client with scope_matching='non_strict', which needs an indexed store."""
+    return ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=token_store or InMemoryIndexedTokenStore(),
+        scope_matching="non_strict",
+    ))
+
+
+@pytest.mark.asyncio
+async def test_nss_exact_scope_hit(mock_discovery, httpx_mock):
+    """non_strict: exact scope repeat returns cached token with no second exchange."""
+    client = _nss_client()
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="nss-token", scope="read:x"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    result1 = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+    result2 = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+
+    assert result1["access_token"] == "nss-token"
+    assert result2["access_token"] == "nss-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_superset_granted_covers_subset_request(mock_discovery, httpx_mock):
+    """non_strict: a request for a subset of the cached granted scopes reuses the token."""
+    client = _nss_client()
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="wide-token", scope="read:x write:x"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x write:x", verified=verified)
+    result = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+
+    assert result["access_token"] == "wide-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_not_covered_triggers_fresh_exchange(mock_discovery, httpx_mock):
+    """non_strict: a request whose scopes exceed the cached granted scopes triggers a fresh exchange."""
+    client = _nss_client()
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="narrow-token", scope="read:x"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="wide-token", scope="read:x write:x"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    result1 = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+    result2 = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x write:x", verified=verified)
+
+    assert result1["access_token"] == "narrow-token"
+    assert result2["access_token"] == "wide-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_nss_downscoped_grant_reused_for_subset(mock_discovery, httpx_mock):
+    """non_strict downscoping: a grant narrower than the request is cached and reused for its subset."""
+    client = _nss_client()
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="downscoped-token", scope="read:x"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    # Request read:x write:x but Auth0 grants only read:x (fresh downscoping).
+    result1 = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x write:x", verified=verified)
+    # Requesting the granted subset reuses it (cached downscoping), no second exchange.
+    result2 = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+
+    assert result1["access_token"] == "downscoped-token"
+    assert result2["access_token"] == "downscoped-token"
+    post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(post_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_omitted_scope_never_reuses(mock_discovery, httpx_mock):
+    """non_strict: a scopeless request never reuses a cached token, since every grant would cover it."""
+    client = _nss_client()
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="scoped-token", scope="read:x"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+    result = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", verified=verified)
+
+    assert result["access_token"] == "fresh-token"
+    post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(post_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_nss_covering_check_uses_granted_not_requested(mock_discovery, httpx_mock):
+    """non_strict: the covering check uses a cached member's granted_scopes, not the original request."""
+    client = _nss_client()
+    token = make_access_token("auth0|user1")
+    audience = "https://api.example.com"
+
+    # Seed a live index member that was granted only read:x.
+    await client._token_store.add_index_member(
+        index_key(token, audience=audience),
+        {
+            "token_key": index_token_key(token, audience=audience, scopes="read:x"),
+            "granted_scopes": "read:x",
+            "expires_at": int(time.time()) + 3600,
+        },
+    )
+    await client._token_store.set(
+        index_token_key(token, audience=audience, scopes="read:x"),
+        {"access_token": "narrow-cached-token", "expires_at": int(time.time()) + 3600, "granted_scopes": "read:x"},
+    )
+
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-wide-token", scope="read:x write:x"),
+    )
+
+    # read:x does not cover read:x write:x, so the seeded member is not reused.
+    result = await client.get_token_on_behalf_of(access_token=token, audience=audience, scope="read:x write:x", verified=verified_for(token, "auth0|user1"))
+
+    assert result["access_token"] == "fresh-wide-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_invalid_scope_matching_raises_configuration_error():
+    """ApiClient construction with an invalid scope_matching value raises ConfigurationError."""
+    with pytest.raises(ConfigurationError) as err:
+        ApiClient(ApiClientOptions(
+            domain="auth0.local",
+            audience="my-audience",
+            scope_matching="invalid_value",
+        ))
+
+    assert "scope_matching" in str(err.value)
+
+
+def test_nss_requires_indexed_store():
+    """non_strict with a plain AbstractTokenStore raises ConfigurationError at construction."""
+    with pytest.raises(ConfigurationError) as err:
+        ApiClient(ApiClientOptions(
+            domain="auth0.local",
+            audience="my-audience",
+            client_id="cid",
+            client_secret="csecret",
+            token_store=InMemoryTokenStore(),
+            scope_matching="non_strict",
+        ))
+    assert "IndexedTokenStore" in str(err.value)
+
+
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
+@pytest.mark.asyncio
+async def test_strict_and_non_strict_do_not_share_cache(mock_discovery, httpx_mock):
+    """A token cached in strict layout is invisible to a non_strict client sharing the same store."""
+    store = InMemoryIndexedTokenStore()
+    strict_client = ApiClient(ApiClientOptions(
+        domain="auth0.local", audience="my-audience", client_id="cid", client_secret="csecret",
+        token_store=store, scope_matching="strict",
+    ))
+    nss_client = ApiClient(ApiClientOptions(
+        domain="auth0.local", audience="my-audience", client_id="cid", client_secret="csecret",
+        token_store=store, scope_matching="non_strict",
+    ))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="strict-token", scope="read:x"))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="nss-token", scope="read:x"))
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    r1 = await strict_client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+    r2 = await nss_client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+
+    assert r1["access_token"] == "strict-token"
+    assert r2["access_token"] == "nss-token"
+    post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(post_requests) == 2
+
+
+# ----- OBO non_strict index -----
+
+class RaisingListIndexTokenStore(InMemoryIndexedTokenStore):
+    """Indexed store whose list_index_members() raises, to verify index read failures fall back to a fresh exchange."""
+
+    async def list_index_members(self, index_key):
+        raise RuntimeError("store unavailable")
+
+
+class RaisingGetIndexTokenStore(InMemoryIndexedTokenStore):
+    """Indexed store whose get() raises, to verify a member's token read failure falls back to a fresh exchange."""
+
+    async def get(self, key):
+        raise RuntimeError("store unavailable")
+
+
+class RaisingAddIndexTokenStore(InMemoryIndexedTokenStore):
+    """Indexed store whose add_index_member() raises, to verify index write failures don't fail the caller."""
+
+    async def add_index_member(self, index_key, member):
+        raise RuntimeError("store unavailable")
+
+
+@pytest.mark.asyncio
+async def test_nss_index_upscope_reuse(mock_discovery, httpx_mock):
+    """Index: a wide token minted first is reused for a narrower subsequent request."""
+    client = _nss_client()
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="wide-token", scope="read:x write:x"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    result1 = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x write:x", verified=verified)
+    result2 = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+
+    assert result1["access_token"] == "wide-token"
+    assert result2["access_token"] == "wide-token"
+    post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(post_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_index_no_evict(mock_discovery, httpx_mock):
+    """Index: minting a non-covering token does not evict a previously cached token."""
+    client = _nss_client()
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="read-token", scope="read:x"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="write-token", scope="write:x"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+    await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="write:x", verified=verified)
+    result3 = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+
+    # read:x entry must still be cached - exchange should have run exactly twice
+    assert result3["access_token"] == "read-token"
+    post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(post_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_nss_index_expired_member_not_reused(mock_discovery, httpx_mock):
+    """Index: an expired member is skipped and a fresh exchange runs."""
+    client = _nss_client()
+    token = make_access_token("auth0|user1")
+    audience = "https://api.example.com"
+
+    # Index member is expired but its token value is still live, so only the index-level expiry check
+    # keeps it from being reused. Removing that check would surface the live value as a hit.
+    token_key = index_token_key(token, audience=audience, scopes="read:x")
+    await client._token_store.add_index_member(index_key(token, audience=audience), {
+        "token_key": token_key,
+        "granted_scopes": "read:x",
+        "expires_at": int(time.time()) - 10,
+    })
+    await client._token_store.set(
+        token_key,
+        {"access_token": "stale-cached-token", "expires_at": int(time.time()) + 3600, "granted_scopes": "read:x"},
+    )
+
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token", scope="read:x"),
+    )
+
+    result = await client.get_token_on_behalf_of(access_token=token, audience=audience, scope="read:x", verified=verified_for(token, "auth0|user1"))
+
+    assert result["access_token"] == "fresh-token"
+    post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(post_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_index_list_failure_falls_back_to_exchange(mock_discovery, httpx_mock):
+    """Index: a failing index read is treated as a miss and a fresh exchange runs."""
+    client = _nss_client(token_store=RaisingListIndexTokenStore())
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token", scope="read:x"),
+    )
+
+    token = make_access_token("auth0|user1")
+    result = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified_for(token, "auth0|user1"))
+
+    assert result["access_token"] == "fresh-token"
+    post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(post_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_index_member_read_failure_falls_back_to_exchange(mock_discovery, httpx_mock):
+    """Index: a live member whose token read fails is treated as a miss and a fresh exchange runs."""
+    client = _nss_client(token_store=RaisingGetIndexTokenStore())
+    token = make_access_token("auth0|user1")
+    audience = "https://api.example.com"
+
+    await client._token_store.add_index_member(index_key(token, audience=audience), {
+        "token_key": index_token_key(token, audience=audience, scopes="read:x"),
+        "granted_scopes": "read:x",
+        "expires_at": int(time.time()) + 3600,
+    })
+
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token", scope="read:x"),
+    )
+
+    result = await client.get_token_on_behalf_of(access_token=token, audience=audience, scope="read:x", verified=verified_for(token, "auth0|user1"))
+
+    assert result["access_token"] == "fresh-token"
+    post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(post_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_index_malformed_member_treated_as_miss(mock_discovery, httpx_mock):
+    """Index: a member missing required fields is skipped, so a fresh exchange runs without raising."""
+    client = _nss_client()
+    token = make_access_token("auth0|user1")
+    audience = "https://api.example.com"
+
+    # A member lacking granted_scopes and expires_at must not break the lookup.
+    await client._token_store.add_index_member(
+        index_key(token, audience=audience),
+        {"token_key": index_token_key(token, audience=audience, scopes="read:x")},
+    )
+
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token", scope="read:x"),
+    )
+
+    result = await client.get_token_on_behalf_of(
+        access_token=token, audience=audience, scope="read:x", verified=verified_for(token, "auth0|user1")
+    )
+
+    assert result["access_token"] == "fresh-token"
+    post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(post_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_index_add_failure_still_returns_token(mock_discovery, httpx_mock):
+    """Index: a failing index write does not fail the caller, the token is still returned."""
+    client = _nss_client(token_store=RaisingAddIndexTokenStore())
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token", scope="read:x"),
+    )
+
+    token = make_access_token("auth0|user1")
+    result = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified_for(token, "auth0|user1"))
+
+    assert result["access_token"] == "fresh-token"
+
+
+class BlobRewriteIndexedTokenStore(InMemoryIndexedTokenStore):
+    """Adversarial store that maintains the index with a non-atomic read-modify-write, to show
+    the atomic per-member add the SDK relies on is what keeps a concurrent addition from being lost."""
+
+    async def add_index_member(self, index_key, member):
+        current = dict(self._index.get(index_key, {}))
+        await asyncio.sleep(0)  # yield mid read-modify-write so a concurrent add is lost
+        current[member["token_key"]] = member
+        self._index[index_key] = current
+
+
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
+@pytest.mark.asyncio
+async def test_nss_index_concurrent_adds_both_survive(mock_discovery, httpx_mock):
+    """Index: two concurrent exchanges for different scopes both stay cached, no lost update."""
+    client = _nss_client()
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="t"))
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    aud = "https://api.example.com"
+    await asyncio.gather(
+        client.get_token_on_behalf_of(access_token=token, audience=aud, scope="read:x", verified=verified),
+        client.get_token_on_behalf_of(access_token=token, audience=aud, scope="write:x", verified=verified),
+    )
+    posts_after_concurrent = len([r for r in httpx_mock.get_requests() if r.method == "POST"])
+
+    # Both scopes must now be cached, so neither follow-up triggers a fresh exchange.
+    await client.get_token_on_behalf_of(access_token=token, audience=aud, scope="read:x", verified=verified)
+    await client.get_token_on_behalf_of(access_token=token, audience=aud, scope="write:x", verified=verified)
+
+    posts_total = len([r for r in httpx_mock.get_requests() if r.method == "POST"])
+    assert posts_after_concurrent == 2
+    assert posts_total == 2
+
+
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
+@pytest.mark.asyncio
+async def test_nss_index_non_atomic_store_loses_concurrent_add(mock_discovery, httpx_mock):
+    """Mutation check for the concurrency guarantee: a non-atomic read-modify-write store loses one
+    of two concurrent additions, so the dropped scope has to exchange again on the next call."""
+    client = _nss_client(token_store=BlobRewriteIndexedTokenStore())
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="t"))
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    aud = "https://api.example.com"
+    await asyncio.gather(
+        client.get_token_on_behalf_of(access_token=token, audience=aud, scope="read:x", verified=verified),
+        client.get_token_on_behalf_of(access_token=token, audience=aud, scope="write:x", verified=verified),
+    )
+
+    await client.get_token_on_behalf_of(access_token=token, audience=aud, scope="read:x", verified=verified)
+    await client.get_token_on_behalf_of(access_token=token, audience=aud, scope="write:x", verified=verified)
+
+    # 2 concurrent exchanges plus 1 re-exchange for the member the non-atomic store dropped.
+    posts_total = len([r for r in httpx_mock.get_requests() if r.method == "POST"])
+    assert posts_total == 3
 
 
 # ----- M2M -----
@@ -3831,12 +4457,47 @@ async def test_get_client_credentials_token_cache_hit(
 
 
 @pytest.mark.asyncio
+async def test_get_client_credentials_token_downscoped_cache_not_reused_for_wider_request(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """A cached grant narrower than a later request is not reused, so Auth0 supplies a wider token."""
+    audience = "https://billing-api.example.com"
+    cache_key = m2m_cache_key(
+        tenant="auth0.local", client_id="cid", audience=audience, scopes="read:billing write:billing"
+    )
+    # Auth0 previously downscoped this request to read:billing only.
+    await api_client_confidential._token_store.set(
+        cache_key,
+        {
+            "access_token": "narrow-m2m-token",
+            "expires_at": int(time.time()) + 3600,
+            "granted_scopes": "read:billing",
+        },
+    )
+
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-m2m-token"),
+    )
+
+    result = await api_client_confidential.get_client_credentials_token(
+        audience=audience,
+        scope="read:billing write:billing",
+    )
+
+    assert result["access_token"] == "fresh-m2m-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_get_client_credentials_token_cache_miss_after_expiry(
     mock_discovery, api_client_confidential, httpx_mock
 ):
     """Test that an expired cached M2M entry triggers a fresh exchange."""
     audience = "https://billing-api.example.com"
-    cache_key = m2m_cache_key(audience=audience, scopes="admin:billing")
+    cache_key = m2m_cache_key(tenant="auth0.local", client_id="cid", audience=audience, scopes="admin:billing")
     await api_client_confidential._token_store.set(
         cache_key,
         {"access_token": "stale-m2m-token", "expires_at": int(time.time()) - 10},
@@ -3868,7 +4529,7 @@ async def test_get_client_credentials_token_store_read_failure_falls_back(
         audience="my-audience",
         client_id="cid",
         client_secret="csecret",
-        token_store=_RaisingGetTokenStore(),
+        token_store=RaisingGetTokenStore(),
     ))
     httpx_mock.add_response(
         method="POST",
@@ -3895,7 +4556,7 @@ async def test_get_client_credentials_token_store_write_failure_still_returns(
         audience="my-audience",
         client_id="cid",
         client_secret="csecret",
-        token_store=_RaisingSetTokenStore(),
+        token_store=RaisingSetTokenStore(),
     ))
     httpx_mock.add_response(
         method="POST",
@@ -4360,8 +5021,8 @@ async def test_mcd_verify_rejects_symmetric_algorithm():
     # Encode header and payload (signature doesn't matter for this test)
     header_b64 = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip('=')
     payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip('=')
-    fake_signature = "fake_signature"
-    hs256_token = f"{header_b64}.{payload_b64}.{fake_signature}"
+    stub_signature = "stub_signature"
+    hs256_token = f"{header_b64}.{payload_b64}.{stub_signature}"
 
     api_client = ApiClient(ApiClientOptions(
         domains=["tenant1.auth0.com"],
