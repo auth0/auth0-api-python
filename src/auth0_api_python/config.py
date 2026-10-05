@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Callable, Literal, Optional, Union
 
 if TYPE_CHECKING:
     from .cache import CacheAdapter
+    from .token_store import AbstractTokenStore
 
 
 class ApiClientOptions:
@@ -21,6 +22,7 @@ class ApiClientOptions:
         audience: The expected 'aud' claim in the token.
         custom_fetch: Optional callable that can replace the default HTTP fetch logic.
         cache_adapter: Custom cache implementation. If not provided, uses default InMemoryCache.
+        token_store: Custom token storage for token caching. If not provided, caching is disabled and every exchange makes a fresh network call.
         cache_ttl_seconds: Time-to-live for cache entries in seconds (default: 600 = 10 minutes).
         cache_max_entries: Maximum number of cache entries before LRU eviction (default: 100).
         dpop_enabled: Whether DPoP is enabled (default: True for backward compatibility).
@@ -40,6 +42,11 @@ class ApiClientOptions:
                           list of non-empty strings). Only valid when organization_policy is
                           "required" - passing it with "allow" raises ConfigurationError at
                           construction time, as does an empty or non-string value.
+        scope_matching: OBO cache scope-matching mode, applied only when token_store is set.
+                        "strict" (default) reuses a cached token only on an exact granted-scope
+                        match. "non_strict" reuses any cached token whose granted scopes cover
+                        the request, and requires a token_store subclassing IndexedTokenStore
+                        (raises ConfigurationError at construction otherwise).
     """
     def __init__(
             self,
@@ -48,6 +55,7 @@ class ApiClientOptions:
             domains: Optional[Union[list[str], Callable[[dict], list[str]]]] = None,
             custom_fetch: Optional[Callable[..., object]] = None,
             cache_adapter: Optional["CacheAdapter"] = None,
+            token_store: Optional["AbstractTokenStore"] = None,
             cache_ttl_seconds: int = 600,
             cache_max_entries: int = 100,
             dpop_enabled: bool = True,
@@ -59,12 +67,14 @@ class ApiClientOptions:
             timeout: float = 10.0,
             organization_policy: Literal["required", "allow"] = "allow",
             organization_id: Optional[Union[str, list[str]]] = None,
+            scope_matching: str = "strict",
     ):
         self.domain = domain
         self.domains = domains
         self.audience = audience
         self.custom_fetch = custom_fetch
         self.cache_adapter = cache_adapter
+        self.token_store = token_store
         self.cache_ttl_seconds = cache_ttl_seconds
         self.cache_max_entries = cache_max_entries
         self.dpop_enabled = dpop_enabled
@@ -76,3 +86,4 @@ class ApiClientOptions:
         self.timeout = timeout
         self.organization_policy = organization_policy
         self.organization_id = organization_id
+        self.scope_matching = scope_matching

@@ -60,6 +60,35 @@ asyncio.run(exchange_on_behalf_of())
 In the current implementation, `get_token_on_behalf_of()` forwards the incoming access token as
 the [RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693#section-2.1) `subject_token` and relies on Auth0 to handle any DPoP-specific behavior for that token.
 
+### Caching the Exchanged Token
+
+To cache the exchanged token, pass a `token_store` when constructing `ApiClient`. Caching activates automatically once a store is configured. The SDK reads `sub` from the incoming token to build the cache key, so no additional argument is needed on each call.
+
+```python
+from auth0_api_python import ApiClient, ApiClientOptions
+
+# token_store is your AbstractTokenStore implementation (e.g. Redis-backed).
+# See docs/TokenStorage.md for how to build one.
+api_client = ApiClient(ApiClientOptions(
+    domain="your-tenant.auth0.com",
+    audience="https://mcp-server.example.com",
+    client_id="<AUTH0_CLIENT_ID>",
+    client_secret="<AUTH0_CLIENT_SECRET>",
+    token_store=your_token_store,
+))
+
+claims = await api_client.verify_access_token(access_token=incoming_access_token)
+
+result = await api_client.get_token_on_behalf_of(
+    access_token=incoming_access_token,
+    audience="https://calendar-api.example.com",
+    scope="calendar:read calendar:write",
+)
+```
+
+See the **[Token Storage Guide](docs/TokenStorage.md)** for a full working example, how to
+implement a Redis-backed store, and the built-in encryption helpers.
+
 ## Inspecting Delegation After Token Verification
 
 When a downstream API or `MCP` server receives an access token that may have been issued through
@@ -273,74 +302,3 @@ async def verify_dpop_token(access_token, dpop_proof, http_method, http_url):
         "proof_claims": proof_claims
     }
 ```
-
-## Anonymous Callers
-
-Anonymous Sessions give a visitor an Auth0 identity before they log in. The access token issued for an anonymous session is a standard Auth0 Bearer JWT, so this SDK validates it like any other token. The one difference is the `sub` claim, which starts with `anon@`.
-
-An anonymous token is verified like any other. It must be issued for this API's audience. To treat anonymous callers differently, or block them, check the `sub` claim after verifying the token. The SDK does not make that authorization decision for you.
-
-### Serve everyone, branch in the handler
-
-```python
-from auth0_api_python import ApiClient, ApiClientOptions
-
-async def handle_cart(headers):
-    api_client = ApiClient(ApiClientOptions(
-        domain="your-tenant.auth0.com",
-        audience="https://api.example.com"
-    ))
-
-    claims = await api_client.verify_request(headers=headers)
-    is_anonymous = claims.get("sub", "").startswith("anon@")
-
-    if is_anonymous:
-        return {"cart": load_guest_cart(claims["sub"])}
-    return {"cart": load_user_cart(claims["sub"])}
-```
-
-> [!NOTE]
-> These snippets construct `ApiClient` inside the handler for clarity. In production, build it once at startup and reuse it, or pass a shared `cache_adapter`, so JWKS and discovery caches persist across requests.
-
-### Block anonymous callers on a specific route
-
-```python
-from auth0_api_python import ApiClient, ApiClientOptions
-
-async def handle_checkout(headers):
-    api_client = ApiClient(ApiClientOptions(
-        domain="your-tenant.auth0.com",
-        audience="https://api.example.com"
-    ))
-
-    claims = await api_client.verify_request(headers=headers)
-    if claims.get("sub", "").startswith("anon@"):
-        raise PermissionError("Anonymous callers are not allowed on this route")
-
-    return {"order": create_order(claims["sub"])}
-```
-
-> [!NOTE]
-> Blocking an anonymous caller should return an HTTP `403 Forbidden`. Replace `PermissionError` with your framework's error type.
-
-### Block anonymous callers everywhere
-
-The SDK has no global "reject anonymous" switch. Centralize the check in whatever shared layer your framework uses for auth (middleware, a FastAPI dependency, a decorator).
-
-```python
-from auth0_api_python import ApiClient, ApiClientOptions
-
-async def require_logged_in_user(headers):
-    api_client = ApiClient(ApiClientOptions(
-        domain="your-tenant.auth0.com",
-        audience="https://api.example.com"
-    ))
-
-    claims = await api_client.verify_request(headers=headers)
-    if claims.get("sub", "").startswith("anon@"):
-        raise PermissionError("Anonymous callers are not allowed")
-    return claims
-```
-
-> [!NOTE]
-> The `anon@` prefix on `sub` is the only signal that distinguishes an anonymous caller from a logged-in user.
