@@ -244,15 +244,17 @@ def test_m2m_cache_key_different_inputs_different_key():
 
 def test_token_vault_cache_key_same_inputs_same_key():
     """Test that identical inputs produce identical cache keys."""
-    assert token_vault_cache_key("sub1", "conn1") == token_vault_cache_key("sub1", "conn1")
+    assert token_vault_cache_key(sub="sub1", connection="conn1", tenant="", client_id="") == token_vault_cache_key(sub="sub1", connection="conn1", tenant="", client_id="")
 
 
 def test_token_vault_cache_key_different_inputs_different_key():
     """Test that a different sub or connection produces a different cache key."""
-    base = token_vault_cache_key("sub1", "conn1")
+    base = token_vault_cache_key(sub="sub1", connection="conn1", tenant="", client_id="")
 
-    assert token_vault_cache_key("sub2", "conn1") != base
-    assert token_vault_cache_key("sub1", "conn2") != base
+    assert token_vault_cache_key(sub="sub2", connection="conn1", tenant="", client_id="") != base
+    assert token_vault_cache_key(sub="sub1", connection="conn2", tenant="", client_id="") != base
+    assert token_vault_cache_key(sub="sub1", connection="conn1", tenant="t1", client_id="") != base
+    assert token_vault_cache_key(sub="sub1", connection="conn1", tenant="", client_id="c1") != base
 
 
 # ===== session_fingerprint =====

@@ -35,6 +35,7 @@ from auth0_api_python._internal.cache_keys import (
     m2m_cache_key,
     obo_cache_key,
     session_fingerprint,
+    token_vault_cache_key,
 )
 from auth0_api_python.api_client import MAX_ARRAY_VALUES_PER_KEY, ApiClient
 from auth0_api_python.config import ApiClientOptions
@@ -4791,6 +4792,263 @@ async def test_nss_index_non_atomic_store_loses_concurrent_add(mock_discovery, h
     # 2 concurrent exchanges plus 1 re-exchange for the member the non-atomic store dropped.
     posts_total = len([r for r in httpx_mock.get_requests() if r.method == "POST"])
     assert posts_total == 3
+
+
+# ----- Token Vault (get_access_token_for_connection) -----
+
+
+def tv_key(sub: str, connection: str) -> str:
+    """The token_vault_cache_key for the confidential fixture's tenant and client."""
+    return token_vault_cache_key(
+        sub=sub, connection=connection,
+        tenant=CONFIDENTIAL_TENANT, client_id=CONFIDENTIAL_CID,
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_cache_hit(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Cache hit: two calls for the same sub+connection perform only one network exchange.
+
+    MUTATION-CHECKED: removing the lookup call from get_access_token_for_connection causes
+    this test to fail because a second POST is made and len(token_requests) == 2 != 1.
+    """
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-access-token"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = VerifiedToken(access_token=token, claims={"sub": "auth0|user1", "iss": CONFIDENTIAL_ISS})
+
+    result1 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token},
+        verified=verified,
+    )
+    result2 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token},
+        verified=verified,
+    )
+
+    assert result1["access_token"] == "tv-access-token"
+    assert result2["access_token"] == "tv-access-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_cache_miss_after_expiry(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """An expired cached entry triggers a fresh exchange."""
+    key = tv_key("auth0|user1", "google-oauth2")
+    await api_client_confidential._token_store.set(
+        key,
+        {"access_token": "stale-tv-token", "expires_at": int(time.time()) - 10},
+    )
+
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-tv-token"),
+    )
+
+    token = make_access_token("auth0|user1")
+    result = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token},
+        verified=VerifiedToken(access_token=token, claims={"sub": "auth0|user1", "iss": CONFIDENTIAL_ISS}),
+    )
+
+    assert result["access_token"] == "fresh-tv-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_different_connection_not_reused(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """A cached entry for connection A is not returned for connection B."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-token-a"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-token-b"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = VerifiedToken(access_token=token, claims={"sub": "auth0|user1", "iss": CONFIDENTIAL_ISS})
+
+    result_a = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token}, verified=verified
+    )
+    result_b = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "github", "access_token": token}, verified=verified
+    )
+
+    assert result_a["access_token"] == "tv-token-a"
+    assert result_b["access_token"] == "tv-token-b"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_different_sub_not_reused(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """A cached entry for sub A is not returned for sub B."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-token-user1"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-token-user2"),
+    )
+
+    token1 = make_access_token("auth0|user1")
+    token2 = make_access_token("auth0|user2")
+
+    result1 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token1},
+        verified=VerifiedToken(access_token=token1, claims={"sub": "auth0|user1", "iss": CONFIDENTIAL_ISS}),
+    )
+    result2 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token2},
+        verified=VerifiedToken(access_token=token2, claims={"sub": "auth0|user2", "iss": CONFIDENTIAL_ISS}),
+    )
+
+    assert result1["access_token"] == "tv-token-user1"
+    assert result2["access_token"] == "tv-token-user2"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_store_read_failure_falls_back(
+    mock_discovery, httpx_mock, caplog
+):
+    """A store read failure logs a warning and falls back to a fresh exchange."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=RaisingGetTokenStore(),
+    ))
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-access-token"),
+    )
+
+    token = make_access_token("auth0|user1")
+    caplog.set_level(logging.WARNING)
+    result = await api_client.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token},
+        verified=VerifiedToken(access_token=token, claims={"sub": "auth0|user1", "iss": CONFIDENTIAL_ISS}),
+    )
+
+    assert result["access_token"] == "tv-access-token"
+    assert any("Token store read failed" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_no_sub_skips_cache(
+    mock_discovery, api_client_confidential, httpx_mock, caplog
+):
+    """A token without a sub claim skips caching with a warning, so each call re-exchanges."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-token-1"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-token-2"),
+    )
+
+    token = make_access_token("auth0|user1")
+    no_sub = VerifiedToken(access_token=token, claims={"iss": CONFIDENTIAL_ISS})
+
+    caplog.set_level(logging.WARNING)
+    result1 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token}, verified=no_sub
+    )
+    result2 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token}, verified=no_sub
+    )
+
+    assert result1["access_token"] == "tv-token-1"
+    assert result2["access_token"] == "tv-token-2"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+    assert any("no usable sub" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_no_verified_calls_verify(
+    mock_discovery, api_client_confidential, httpx_mock, monkeypatch
+):
+    """With no verified= param, the client calls verify_access_token before the exchange.
+
+    verify_access_token is called once per invocation even when the second call hits the cache,
+    because verification precedes the cache lookup. The POST exchange fires only once.
+    """
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-access-token"),
+    )
+
+    verify_calls = []
+
+    async def stub_verify(access_token: str):
+        verify_calls.append(access_token)
+        return {"sub": "auth0|user1", "iss": CONFIDENTIAL_ISS}
+
+    monkeypatch.setattr(api_client_confidential, "verify_access_token", stub_verify)
+
+    token = make_access_token("auth0|user1")
+    result1 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token},
+    )
+    result2 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token},
+    )
+
+    assert result1["access_token"] == "tv-access-token"
+    assert result2["access_token"] == "tv-access-token"
+    assert len(verify_calls) == 2
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_verified_mismatch_raises(
+    api_client_confidential, httpx_mock
+):
+    """A verified token whose access_token differs from the one being exchanged is rejected."""
+    token = make_access_token("auth0|user1")
+    other = make_access_token("auth0|user2")
+
+    with pytest.raises(VerifyAccessTokenError):
+        await api_client_confidential.get_access_token_for_connection(
+            {"connection": "google-oauth2", "access_token": token},
+            verified=verified_for(other, "auth0|user2"),
+        )
+
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 0
 
 
 # ===== MCD (Multi-Custom Domain) Tests =====
