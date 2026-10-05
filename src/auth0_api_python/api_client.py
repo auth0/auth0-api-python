@@ -7,7 +7,6 @@ from typing import Any, Optional, Union
 import httpx
 from authlib.jose import JsonWebKey, JsonWebToken
 
-from ._internal.cache_keys import _normalized_scopes, is_covered_by
 from ._internal.obo_cache import OboCache
 from .cache import InMemoryCache
 from .config import ApiClientOptions
@@ -24,7 +23,6 @@ from .errors import (
     MissingOrganizationError,
     MissingRequiredArgumentError,
     OrganizationNotAllowedError,
-    TokenStoreError,
     VerifyAccessTokenError,
 )
 from .token_store import (
