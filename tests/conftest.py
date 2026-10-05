@@ -1,6 +1,7 @@
 """Shared test fixtures and helpers for auth0-api-python tests."""
 
 import base64
+import time
 import urllib.parse
 from typing import Optional
 
@@ -9,6 +10,49 @@ from pytest_httpx import HTTPXMock
 
 from auth0_api_python import ApiClient, ApiClientOptions
 from auth0_api_python.errors import ApiError
+from auth0_api_python.token_store import (
+    AbstractTokenStore,
+    IndexedTokenStore,
+    TokenIndexMember,
+    TokenSet,
+)
+
+
+class InMemoryTokenStore(AbstractTokenStore):
+    """Minimal in-memory store for tests. Not for production use."""
+
+    def __init__(self, *, secret: str = "test-secret") -> None:  # noqa: S107
+        super().__init__(secret=secret)
+        self._store: dict[str, TokenSet] = {}
+
+    async def get(self, key: str) -> Optional[TokenSet]:
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        if entry["expires_at"] <= int(time.time()):
+            del self._store[key]
+            return None
+        return entry
+
+    async def set(self, key: str, value: TokenSet) -> None:
+        self._store[key] = value
+
+    async def delete(self, key: str) -> None:
+        self._store.pop(key, None)
+
+
+class InMemoryIndexedTokenStore(InMemoryTokenStore, IndexedTokenStore):
+    """In-memory IndexedTokenStore for tests. Not for production use."""
+
+    def __init__(self, *, secret: str = "test-secret") -> None:  # noqa: S107
+        super().__init__(secret=secret)
+        self._index: dict[str, dict[str, TokenIndexMember]] = {}
+
+    async def add_index_member(self, index_key: str, member: TokenIndexMember) -> None:
+        self._index.setdefault(index_key, {})[member["token_key"]] = member
+
+    async def list_index_members(self, index_key: str) -> list[TokenIndexMember]:
+        return list(self._index.get(index_key, {}).values())
 
 # ===== Constants =====
 
@@ -21,6 +65,18 @@ TOKEN_ENDPOINT = "https://auth0.local/oauth/token"
 @pytest.fixture
 def api_client_confidential():
     """Fixture for creating a confidential API client with credentials."""
+    return ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=InMemoryTokenStore(),
+    ))
+
+
+@pytest.fixture
+def api_client_confidential_no_store():
+    """Confidential client without a token_store, so OBO exchanges never cache or verify."""
     return ApiClient(ApiClientOptions(
         domain="auth0.local",
         audience="my-audience",

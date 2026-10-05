@@ -251,6 +251,10 @@ token as the `subject_token` and relies on Auth0 to handle any DPoP-specific beh
 The OBO result only includes access-token-oriented fields. It does not expose `id_token` or
 `refresh_token`.
 
+Configuring a `token_store` on `ApiClientOptions` caches the exchanged token, so a repeat call for
+the same caller, audience, organization, scopes, and session reuses it instead of exchanging again.
+With no `token_store`, every call performs a fresh exchange, matching the existing behavior above.
+
 #### Inspecting Delegation After Token Verification
 
 When a downstream API or `MCP` server receives an access token that may have been issued through
@@ -407,6 +411,7 @@ For hybrid mode (migration scenarios), resolver patterns, error handling, and ca
 
 - **[Multi-Custom Domain Guide](docs/MultipleCustomDomain.md)** - Configuration modes, resolver patterns, migration, error handling
 - **[Caching Guide](docs/Caching.md)** - Cache tuning, custom adapters (Redis, Memcached)
+- **[Token Storage Guide](docs/TokenStorage.md)** - Caching OBO exchanges, custom TokenStore backends, at-rest encryption
 
 ### 8. Anonymous Callers
 

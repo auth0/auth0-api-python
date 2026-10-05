@@ -16,6 +16,14 @@ from .errors import (
     GetTokenByExchangeProfileError,
     MissingOrganizationError,
     OrganizationNotAllowedError,
+    TokenStoreError,
+)
+from .token_store import (
+    AbstractTokenStore,
+    IndexedTokenStore,
+    TokenIndexMember,
+    TokenSet,
+    VerifiedToken,
 )
 from .types import (
     DomainsResolver,
@@ -33,10 +41,16 @@ __all__ = [
     "DomainsResolverContext",
     "DomainsResolverError",
     "GetTokenByExchangeProfileError",
+    "TokenStoreError",
     "get_current_actor",
     "get_delegation_chain",
     "InMemoryCache",
     "MissingOrganizationError",
+    "AbstractTokenStore",
+    "IndexedTokenStore",
+    "TokenIndexMember",
+    "VerifiedToken",
     "OnBehalfOfTokenResult",
     "OrganizationNotAllowedError",
+    "TokenSet",
 ]
