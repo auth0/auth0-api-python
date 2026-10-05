@@ -9,6 +9,7 @@ from authlib.jose import JsonWebKey, JsonWebToken
 
 from ._internal.cache_keys import m2m_cache_key
 from ._internal.obo_cache import OboCache
+from ._internal.token_vault_cache import TokenVaultCache
 from .cache import InMemoryCache
 from .config import ApiClientOptions
 from .errors import (
@@ -166,6 +167,11 @@ class ApiClient:
                 exchange_client_id=options.client_id or "",
                 scope_matching=options.scope_matching,
             )
+            if options.token_store is not None
+            else None
+        )
+        self._token_vault_cache = (
+            TokenVaultCache(options.token_store)
             if options.token_store is not None
             else None
         )
@@ -725,7 +731,12 @@ class ApiClient:
 
         return claims
 
-    async def get_access_token_for_connection(self, options: dict[str, Any]) -> dict[str, Any]:
+    async def get_access_token_for_connection(
+        self,
+        options: dict[str, Any],
+        *,
+        verified: Optional[VerifiedToken] = None,
+    ) -> dict[str, Any]:
         """
         Retrieves a token for a connection.
 
@@ -733,10 +744,14 @@ class ApiClient:
             options: Options for retrieving an access token for a connection.
                 Must include 'connection' and 'access_token' keys.
                 May optionally include 'login_hint'.
+            verified: The already-verified token, supplied by a caller that has verified it (for
+                      example an MCP server). When omitted and a token_store is configured, the
+                      token is verified here before any cache lookup.
 
         Raises:
             GetAccessTokenForConnectionError: If there was an issue requesting the access token.
             ApiError: If the token exchange endpoint returns an error.
+            VerifyAccessTokenError: If a store is configured and either verified is omitted and the token fails verification, or verified is supplied but does not match the access token being exchanged.
 
         Returns:
             Dictionary containing the token response with access_token, expires_in, and scope.
@@ -745,8 +760,8 @@ class ApiClient:
         SUBJECT_TYPE_ACCESS_TOKEN = "urn:ietf:params:oauth:token-type:access_token"  # noqa S105
         REQUESTED_TOKEN_TYPE_FEDERATED_CONNECTION_ACCESS_TOKEN = "http://auth0.com/oauth/token-type/federated-connection-access-token"  # noqa S105
         GRANT_TYPE_FEDERATED_CONNECTION_ACCESS_TOKEN = "urn:auth0:params:oauth:grant-type:token-exchange:federated-connection-access-token"  # noqa S105
-        connection = options.get("connection")
-        access_token = options.get("access_token")
+        connection = options.get("connection", "")
+        access_token = options.get("access_token", "")
 
         if not connection:
             raise MissingRequiredArgumentError("connection")
@@ -758,6 +773,28 @@ class ApiClient:
         client_secret = self.options.client_secret
         if not client_id or not client_secret:
             raise GetAccessTokenForConnectionError("You must configure the SDK with a client_id and client_secret to use get_access_token_for_connection.")
+
+        cache_key = None
+        if self._token_vault_cache is not None:
+            if verified is None:
+                claims = await self.verify_access_token(access_token)
+                verified = VerifiedToken(access_token=access_token, claims=claims)
+            elif verified.access_token != access_token:
+                # Claims must belong to the token being exchanged or a caller could read another token's entry.
+                raise VerifyAccessTokenError(
+                    "verified token does not match the access token being exchanged"
+                )
+            cache_key = self._token_vault_cache.cache_key(
+                tenant=self.options.domain or "",
+                client_id=self.options.client_id or "",
+                sub=verified.claims.get("sub"),
+                connection=connection,
+            )
+
+        if cache_key is not None:
+            hit = await self._token_vault_cache.lookup(cache_key)
+            if hit is not None:
+                return hit
 
         metadata = await self._discover()
 
@@ -817,11 +854,17 @@ class ApiClient:
                 except (TypeError, ValueError):
                     raise ApiError("invalid_response", "expires_in is not an integer.", 502)
 
-                return {
+                result = {
                     "access_token": access_token,
+                    "expires_in": expires_in,
                     "expires_at": int(time.time()) + expires_in,
                     "scope": token_endpoint_response.get("scope", "")
                 }
+
+                if cache_key is not None:
+                    await self._token_vault_cache.write(cache_key, result)
+
+                return result
 
         except httpx.TimeoutException as exc:
             raise ApiError(
