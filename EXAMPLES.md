@@ -124,6 +124,68 @@ async with httpx.AsyncClient() as client:
 
 More info: [Client Credentials Flow](https://auth0.com/docs/get-started/authentication-and-authorization-flow/client-credentials-flow)
 
+## Access Token for a Connection (Token Vault)
+
+`get_access_token_for_connection()` exchanges the user's Auth0 access token for a token from a federated identity provider (such as Google) via Auth0's Token Vault.
+
+Three things must exist on your Auth0 tenant before this works. The Token Vault grant must be enabled on your application, which must be a confidential (resource-server) client. The connection (for example `google-oauth2`) must be configured and enabled on that application. The user must have linked their account through Auth0's Connected Accounts flow. See the [Token Vault setup guide](https://auth0.com/docs/secure/tokens/token-vault/configure-token-vault) for the application setup and the [Connected Accounts guide](https://auth0.com/docs/secure/tokens/token-vault/connected-accounts-for-token-vault) for the user-linking step.
+
+### Basic call
+
+```python
+import httpx
+
+from auth0_api_python import ApiClient, ApiClientOptions
+
+api_client = ApiClient(ApiClientOptions(
+    domain="your-tenant.auth0.com",
+    audience="https://mcp-server.example.com",
+    client_id="<AUTH0_CLIENT_ID>",
+    client_secret="<AUTH0_CLIENT_SECRET>",
+))
+
+incoming_access_token = "incoming-auth0-access-token"
+
+result = await api_client.get_access_token_for_connection({
+    "connection": "google-oauth2",
+    "access_token": incoming_access_token,
+})
+
+async with httpx.AsyncClient() as client:
+    response = await client.get(
+        "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+        headers={"Authorization": f"Bearer {result['access_token']}"},
+    )
+```
+
+### With caching
+
+Pass a `token_store` to cache the connection token. The SDK caches by `sub` (caller) and `connection`, skipping the exchange on repeat calls for the same user and provider. Pass `verified=` with the result of `verify_access_token()` to reuse that verification rather than running it again inside the exchange.
+
+```python
+from auth0_api_python import ApiClient, ApiClientOptions
+
+# token_store is your AbstractTokenStore implementation.
+# See docs/TokenStorage.md for how to build one and for encryption details.
+api_client = ApiClient(ApiClientOptions(
+    domain="your-tenant.auth0.com",
+    audience="https://mcp-server.example.com",
+    client_id="<AUTH0_CLIENT_ID>",
+    client_secret="<AUTH0_CLIENT_SECRET>",
+    token_store=your_token_store,
+))
+
+incoming_access_token = "incoming-auth0-access-token"
+
+# Verify once, then pass the result to avoid a second verification inside the exchange.
+verified = await api_client.verify_access_token(access_token=incoming_access_token)
+
+result = await api_client.get_access_token_for_connection(
+    {"connection": "google-oauth2", "access_token": incoming_access_token},
+    verified=verified,
+)
+```
+
 ## Inspecting Delegation After Token Verification
 
 When a downstream API or `MCP` server receives an access token that may have been issued through

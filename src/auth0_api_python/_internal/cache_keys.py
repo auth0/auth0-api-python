@@ -140,7 +140,7 @@ def m2m_cache_key(*, tenant: str, client_id: str, audience: str, scopes: Optiona
     return hashlib.sha256(fields.encode()).hexdigest()
 
 
-def token_vault_cache_key(sub: str, connection: str) -> str:
-    """Cache key for a Token Vault exchange, scoped to caller and connection."""
-    fields = _FIELD_SEPARATOR.join(["token_vault", sub, connection])
+def token_vault_cache_key(*, sub: str, connection: str, tenant: str, client_id: str) -> str:
+    """Cache key for a Token Vault exchange, scoped to tenant, client, caller, and connection."""
+    fields = _FIELD_SEPARATOR.join(["token_vault", tenant, client_id, sub, connection])
     return hashlib.sha256(fields.encode()).hexdigest()

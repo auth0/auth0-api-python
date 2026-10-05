@@ -13,9 +13,11 @@ from .errors import (
     ApiError,
     ConfigurationError,
     DomainsResolverError,
+    GetAccessTokenForConnectionError,
     GetClientCredentialsTokenError,
     GetTokenByExchangeProfileError,
     TokenStoreError,
+    VerifyAccessTokenError,
 )
 from .token_store import (
     AbstractTokenStore,
@@ -41,9 +43,11 @@ __all__ = [
     "DomainsResolver",
     "DomainsResolverContext",
     "DomainsResolverError",
+    "GetAccessTokenForConnectionError",
     "GetClientCredentialsTokenError",
     "GetTokenByExchangeProfileError",
     "TokenStoreError",
+    "VerifyAccessTokenError",
     "get_current_actor",
     "get_delegation_chain",
     "InMemoryCache",
