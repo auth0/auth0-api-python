@@ -1,9 +1,6 @@
 # Token Storage
 
-The SDK can cache access tokens it mints on the caller's behalf. Currently this covers tokens
-returned by `get_token_on_behalf_of()`. This is separate from the `CacheAdapter` described in the
-[Caching Guide](Caching.md), which only caches OIDC discovery metadata and JWKS keys, never a live
-bearer token.
+The SDK can cache access tokens it mints on the caller's behalf. The same store covers tokens returned by `get_token_on_behalf_of()`, M2M tokens from `get_client_credentials_token()`, and federated-connection tokens from `get_access_token_for_connection()`. This is separate from the `CacheAdapter` described in the [Caching Guide](Caching.md), which only caches OIDC discovery metadata and JWKS keys, never a live bearer token.
 
 ## Default Behavior
 
@@ -13,6 +10,10 @@ performs a fresh exchange and nothing is stored.
 To enable caching, pass a `token_store` to `ApiClientOptions`. Once a store is configured, the SDK
 automatically builds a cache key from the incoming token and no additional argument is needed per
 call.
+
+## Cache Key Shapes
+
+The store uses a different cache key for each exchange method. OBO tokens from `get_token_on_behalf_of()` use the most detailed key, incorporating verified issuer, incoming client, exchange tenant and client, audience, organization, session, and granted scopes (see [On Behalf Of Exchange with Caching](#on-behalf-of-exchange-with-caching) for the full design). M2M tokens from `get_client_credentials_token()` are keyed on tenant, client, audience, and the requested scope set because the server is the identity and there is no user `sub`. Connection tokens from `get_access_token_for_connection()` are keyed on tenant, client, `sub` (the caller), and `connection` with no scope dimension, since the federated provider determines what scopes apply.
 
 ## On Behalf Of Exchange with Caching
 
