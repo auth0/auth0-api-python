@@ -1,8 +1,4 @@
-"""Caching for On Behalf Of exchanges: cache-key identity, lookup, and write.
-
-Kept out of ApiClient so the exchange path stays readable. ApiClient builds one OboCache when a
-token_store is configured and delegates every cache decision to it.
-"""
+"""Caching for On Behalf Of exchanges: cache-key identity, lookup, and write."""
 
 import logging
 import time
