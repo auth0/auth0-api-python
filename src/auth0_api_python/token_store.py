@@ -36,17 +36,17 @@ class AbstractTokenStore(ABC):
     @abstractmethod
     async def get(self, key: str) -> Optional[TokenSet]:
         """Return the stored token or None if absent."""
-        ...
+        pass
 
     @abstractmethod
     async def set(self, key: str, value: TokenSet) -> None:
         """Store a token under key."""
-        ...
+        pass
 
     @abstractmethod
     async def delete(self, key: str) -> None:
         """Delete a stored token by key."""
-        ...
+        pass
 
     def encrypt(self, key: str, value: TokenSet) -> str:
         """Encrypt a TokenSet to a JWE string, keyed to this specific cache entry."""
@@ -71,9 +71,9 @@ class IndexedTokenStore(AbstractTokenStore):
     @abstractmethod
     async def add_index_member(self, index_key: str, member: TokenIndexMember) -> None:
         """Atomically add member to the index, replacing any member with the same token_key."""
-        ...
+        pass
 
     @abstractmethod
     async def list_index_members(self, index_key: str) -> list[TokenIndexMember]:
         """Return the index members, possibly including expired ones, or [] if the index is absent."""
-        ...
+        pass
