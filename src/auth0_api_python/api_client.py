@@ -1215,7 +1215,7 @@ class ApiClient:
                         if "json" in content_type:
                             error_data = response.json()
                     except ValueError:
-                        pass
+                        pass  # Ignore JSON parse errors, use generic error message below
 
                     raise ApiError(
                         error_data.get("error", "client_credentials_error"),
