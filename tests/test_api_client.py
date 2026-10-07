@@ -4193,6 +4193,55 @@ async def test_get_client_credentials_token_cache_hit(
 
 
 @pytest.mark.asyncio
+async def test_get_client_credentials_token_cache_hit_returns_granted_scope(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """A cache hit returns the same scope Auth0 granted on the original exchange."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="m2m-access-token", scope="admin:billing read:billing"),
+    )
+
+    miss = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+    hit = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+
+    assert miss["scope"] == "admin:billing read:billing"
+    assert hit["scope"] == miss["scope"]
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_cache_hit_without_scope_in_response(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """A cache hit has no scope when Auth0 did not return one, matching the fresh exchange."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="m2m-access-token"),
+    )
+
+    await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+    hit = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+
+    assert "scope" not in hit
+
+
+@pytest.mark.asyncio
 async def test_get_client_credentials_token_cache_miss_after_expiry(
     mock_discovery, api_client_confidential, httpx_mock
 ):

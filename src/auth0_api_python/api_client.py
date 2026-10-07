@@ -1178,11 +1178,14 @@ class ApiClient:
                 if "access_token" not in cached or "expires_at" not in cached:
                     logging.warning("Token store returned a malformed entry, treating as cache miss")
                 elif cached["expires_at"] > int(time.time()):
-                    return {
+                    hit: ClientCredentialsTokenResult = {
                         "access_token": cached["access_token"],
                         "expires_in": cached["expires_at"] - int(time.time()),
                         "expires_at": cached["expires_at"],
                     }
+                    if cached.get("granted_scopes"):
+                        hit["scope"] = cached["granted_scopes"]
+                    return hit
 
         metadata = await self._discover()
         token_endpoint = metadata.get("token_endpoint")
@@ -1255,13 +1258,13 @@ class ApiClient:
 
         if cache_key is not None:
             try:
-                await self._token_store.set(
-                    cache_key,
-                    {
-                        "access_token": cc_result["access_token"],
-                        "expires_at": cc_result["expires_at"],
-                    },
-                )
+                entry: dict[str, Any] = {
+                    "access_token": cc_result["access_token"],
+                    "expires_at": cc_result["expires_at"],
+                }
+                if "scope" in cc_result:
+                    entry["granted_scopes"] = cc_result["scope"]
+                await self._token_store.set(cache_key, entry)
             except Exception as exc:
                 store_err = TokenStoreError("Token store write failed", cause=exc)
                 logging.warning("Token store write failed, token still returned: %s", store_err.cause)
