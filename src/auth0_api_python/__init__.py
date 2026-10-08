@@ -14,6 +14,8 @@ from .errors import (
     ConfigurationError,
     DomainsResolverError,
     GetTokenByExchangeProfileError,
+    MissingOrganizationError,
+    OrganizationNotAllowedError,
 )
 from .types import (
     DomainsResolver,
@@ -34,5 +36,7 @@ __all__ = [
     "get_current_actor",
     "get_delegation_chain",
     "InMemoryCache",
+    "MissingOrganizationError",
     "OnBehalfOfTokenResult",
+    "OrganizationNotAllowedError",
 ]
