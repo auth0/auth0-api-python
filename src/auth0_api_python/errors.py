@@ -124,6 +124,16 @@ class GetTokenByExchangeProfileError(BaseAuthError):
         return "get_token_by_exchange_profile_error"
 
 
+class GetClientCredentialsTokenError(BaseAuthError):
+    """Error raised when a client credentials token request fails before the network call."""
+
+    def get_status_code(self) -> int:
+        return 400
+
+    def get_error_code(self) -> str:
+        return "get_client_credentials_token_error"
+
+
 class ApiError(BaseAuthError):
     """
     Error raised when an API request to Auth0 fails.
