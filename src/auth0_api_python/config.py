@@ -2,7 +2,7 @@
 Configuration classes and utilities for auth0-api-python.
 """
 
-from typing import TYPE_CHECKING, Callable, Optional, Union
+from typing import TYPE_CHECKING, Callable, Literal, Optional, Union
 
 if TYPE_CHECKING:
     from .cache import CacheAdapter
@@ -36,9 +36,10 @@ class ApiClientOptions:
                               "allow" (default) uses org_id when present but does not require it,
                               matching the pre-existing behavior of verify_access_token.
                               "required" rejects any token without an org_id claim.
-        organization_id: Optional allowlist of org_id claim values (a single value or a list).
-                          Only valid when organization_policy is "required" - passing it with
-                          "allow" raises ConfigurationError at construction time.
+        organization_id: Optional allowlist of org_id claim values (a non-empty string or a non-empty
+                          list of non-empty strings). Only valid when organization_policy is
+                          "required" - passing it with "allow" raises ConfigurationError at
+                          construction time, as does an empty or non-string value.
     """
     def __init__(
             self,
@@ -56,7 +57,7 @@ class ApiClientOptions:
             client_id: Optional[str] = None,
             client_secret: Optional[str] = None,
             timeout: float = 10.0,
-            organization_policy: str = "allow",
+            organization_policy: Literal["required", "allow"] = "allow",
             organization_id: Optional[Union[str, list[str]]] = None,
     ):
         self.domain = domain

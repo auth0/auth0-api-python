@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional, Union
@@ -111,10 +112,23 @@ class ApiClient:
             raise ConfigurationError(
                 "organization_policy must be either 'required' or 'allow'"
             )
-        if options.organization_id is not None and options.organization_policy != "required":
+        if options.organization_id is None:
+            self._allowed_org_ids = None
+        elif options.organization_policy != "required":
             raise ConfigurationError(
                 "organization_id is only valid when organization_policy is 'required'"
             )
+        else:
+            org_ids = options.organization_id
+            if isinstance(org_ids, str):
+                org_ids = [org_ids]
+            if not isinstance(org_ids, list) or not org_ids or not all(
+                isinstance(o, str) and o.strip() for o in org_ids
+            ):
+                raise ConfigurationError(
+                    "organization_id must be a non-empty string or a non-empty list of non-empty strings"
+                )
+            self._allowed_org_ids = frozenset(org_ids)
 
         if options.cache_adapter:
             self._discovery_cache = options.cache_adapter
@@ -577,18 +591,13 @@ class ApiClient:
                 raise VerifyAccessTokenError(f"Missing required claim: {rc}")
 
         # Organization policy enforcement
-        org_id = claims.get("org_id")
         if self.options.organization_policy == "required":
-            if not org_id:
+            org_id = claims.get("org_id")
+            if not isinstance(org_id, str) or not org_id:
                 raise MissingOrganizationError("Token missing required 'org_id' claim")
-            allowed_orgs = self.options.organization_id
-            if allowed_orgs is not None:
-                if isinstance(allowed_orgs, str):
-                    allowed_orgs = [allowed_orgs]
-                if org_id not in allowed_orgs:
-                    raise OrganizationNotAllowedError(
-                        f"Organization '{org_id}' is not in the allowed list"
-                    )
+            if self._allowed_org_ids is not None and org_id not in self._allowed_org_ids:
+                logging.warning("Rejected token with org_id %r not in the organization_id allowlist", org_id)
+                raise OrganizationNotAllowedError("Token org_id is not in the allowed list")
 
         return claims
 

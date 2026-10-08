@@ -19,7 +19,13 @@ from conftest import (
 from freezegun import freeze_time
 from pytest_httpx import HTTPXMock
 
-from auth0_api_python import get_current_actor, get_delegation_chain
+from auth0_api_python import (
+    MissingOrganizationError,
+    OrganizationNotAllowedError,
+    get_current_actor,
+    get_delegation_chain,
+)
+from auth0_api_python import __all__ as package_exports
 from auth0_api_python.api_client import MAX_ARRAY_VALUES_PER_KEY, ApiClient
 from auth0_api_python.config import ApiClientOptions
 from auth0_api_python.errors import (
@@ -31,9 +37,7 @@ from auth0_api_python.errors import (
     InvalidAuthSchemeError,
     InvalidDpopProofError,
     MissingAuthorizationError,
-    MissingOrganizationError,
     MissingRequiredArgumentError,
-    OrganizationNotAllowedError,
     VerifyAccessTokenError,
 )
 from auth0_api_python.token_utils import (
@@ -520,7 +524,8 @@ async def test_organization_policy_missing_org_id_when_required(httpx_mock: HTTP
     with pytest.raises(MissingOrganizationError) as err:
         await api_client.verify_access_token(access_token=access_token)
 
-    assert err.value.get_error_code() == "missing_organization"
+    assert err.value.get_error_code() == "invalid_token"
+    assert err.value.get_status_code() == 401
 
 
 @pytest.mark.asyncio
@@ -571,7 +576,9 @@ async def test_organization_policy_disallowed_org(httpx_mock: HTTPXMock):
     with pytest.raises(OrganizationNotAllowedError) as err:
         await api_client.verify_access_token(access_token=access_token)
 
-    assert err.value.get_error_code() == "organization_not_allowed"
+    assert err.value.get_error_code() == "invalid_token"
+    assert err.value.get_status_code() == 401
+    assert "org_untrusted" not in str(err.value)
 
 
 @pytest.mark.asyncio
@@ -670,6 +677,154 @@ async def test_organization_policy_default_allow_does_not_require_org_id(httpx_m
     claims = await api_client.verify_access_token(access_token=access_token)
 
     assert claims["sub"] == "user_123"
+
+
+@pytest.mark.asyncio
+async def test_organization_policy_single_string_allowlist(httpx_mock: HTTPXMock):
+    """Test that a single string organization_id accepts a matching org_id and rejects others."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"jwks_uri": JWKS_URL, "issuer": "https://auth0.local/"},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={"keys": [PUBLIC_RSA_JWK]},
+    )
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        organization_policy="required",
+        organization_id="org_abc123",
+    ))
+
+    allowed = await generate_token(
+        domain="auth0.local", user_id="user_123", audience="my-audience", claims={"org_id": "org_abc123"},
+    )
+    claims = await api_client.verify_access_token(access_token=allowed)
+    assert claims["org_id"] == "org_abc123"
+
+    other = await generate_token(
+        domain="auth0.local", user_id="user_123", audience="my-audience", claims={"org_id": "org_other"},
+    )
+    with pytest.raises(OrganizationNotAllowedError):
+        await api_client.verify_access_token(access_token=other)
+
+
+@pytest.mark.asyncio
+async def test_organization_policy_required_without_allowlist_accepts_any_org(httpx_mock: HTTPXMock):
+    """Test that 'required' with no allowlist accepts any token that carries an org_id."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"jwks_uri": JWKS_URL, "issuer": "https://auth0.local/"},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={"keys": [PUBLIC_RSA_JWK]},
+    )
+
+    token = await generate_token(
+        domain="auth0.local", user_id="user_123", audience="my-audience", claims={"org_id": "org_any"},
+    )
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local", audience="my-audience", organization_policy="required",
+    ))
+
+    claims = await api_client.verify_access_token(access_token=token)
+
+    assert claims["org_id"] == "org_any"
+
+
+@pytest.mark.asyncio
+async def test_organization_policy_allow_accepts_token_with_org_id(httpx_mock: HTTPXMock):
+    """Test that the default 'allow' policy accepts a token that carries an org_id."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"jwks_uri": JWKS_URL, "issuer": "https://auth0.local/"},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={"keys": [PUBLIC_RSA_JWK]},
+    )
+
+    token = await generate_token(
+        domain="auth0.local", user_id="user_123", audience="my-audience", claims={"org_id": "org_any"},
+    )
+    api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
+
+    claims = await api_client.verify_access_token(access_token=token)
+
+    assert claims["org_id"] == "org_any"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("org_id", [123, ["org_abc123"], "", None])
+async def test_organization_policy_rejects_non_string_org_id(httpx_mock: HTTPXMock, org_id):
+    """Test that an org_id claim that is not a non-empty string is treated as missing."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"jwks_uri": JWKS_URL, "issuer": "https://auth0.local/"},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={"keys": [PUBLIC_RSA_JWK]},
+    )
+
+    token = await generate_token(
+        domain="auth0.local", user_id="user_123", audience="my-audience", claims={"org_id": org_id},
+    )
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        organization_policy="required",
+        organization_id=["org_abc123"],
+    ))
+
+    with pytest.raises(MissingOrganizationError):
+        await api_client.verify_access_token(access_token=token)
+
+
+@pytest.mark.asyncio
+async def test_organization_policy_logs_rejected_org_id(httpx_mock: HTTPXMock, caplog):
+    """Test that the rejected org_id is logged since it is kept out of the error message."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"jwks_uri": JWKS_URL, "issuer": "https://auth0.local/"},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={"keys": [PUBLIC_RSA_JWK]},
+    )
+
+    token = await generate_token(
+        domain="auth0.local", user_id="user_123", audience="my-audience", claims={"org_id": "org_untrusted"},
+    )
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        organization_policy="required",
+        organization_id=["org_abc123"],
+    ))
+
+    with caplog.at_level("WARNING"), pytest.raises(OrganizationNotAllowedError):
+        await api_client.verify_access_token(access_token=token)
+
+    assert "org_untrusted" in caplog.text
+
+
+def test_organization_errors_are_exported_from_package_root():
+    """Test that the organization errors are listed in the package-root exports."""
+    assert {"MissingOrganizationError", "OrganizationNotAllowedError"} <= set(package_exports)
 
 
 # DPOP PROOF VERIFICATION TESTS
@@ -1962,6 +2117,43 @@ async def test_verify_request_dpop_required_mismatch(dpop_required, auth_header,
 
     assert err.value.get_status_code() == 400
     assert "invalid_request" in str(err.value.get_error_code()).lower()
+
+
+@pytest.mark.asyncio
+async def test_organization_policy_verify_request_header_uses_invalid_token_and_static_text(httpx_mock: HTTPXMock):
+    """Test that org failures surface as invalid_token in WWW-Authenticate without echoing the org_id."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"jwks_uri": JWKS_URL, "issuer": "https://auth0.local/"},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={"keys": [PUBLIC_RSA_JWK]},
+    )
+
+    token = await generate_token(
+        domain="auth0.local", user_id="user_123", audience="my-audience", claims={"org_id": "org_untrusted"},
+    )
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        organization_policy="required",
+        organization_id=["org_abc123"],
+    ))
+
+    with pytest.raises(OrganizationNotAllowedError) as err:
+        await api_client.verify_request(
+            headers={"authorization": f"Bearer {token}"},
+            http_method="GET",
+            http_url="https://api.example.com/resource",
+        )
+
+    header = err.value.get_headers()["WWW-Authenticate"]
+    assert 'error="invalid_token"' in header
+    assert "org_untrusted" not in header
+
 
 @pytest.mark.asyncio
 async def test_get_access_token_for_connection_success(httpx_mock: HTTPXMock):
@@ -3468,6 +3660,34 @@ async def test_organization_id_with_allow_policy_raises_at_construction(httpx_mo
             audience="my-audience",
             organization_policy="allow",
             organization_id="org_abc123",
+        ))
+
+    assert_no_requests(httpx_mock)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("organization_id", [[], "", 123, [" "], [""], ["org_abc123", 5], ("org_abc123",)])
+async def test_organization_id_invalid_value_raises_at_construction(httpx_mock: HTTPXMock, organization_id):
+    """Test that an empty or non-string organization_id raises ConfigurationError at construction."""
+    with pytest.raises(ConfigurationError, match="organization_id must be a non-empty string or a non-empty list"):
+        ApiClient(ApiClientOptions(
+            domain="auth0.local",
+            audience="my-audience",
+            organization_policy="required",
+            organization_id=organization_id,
+        ))
+
+    assert_no_requests(httpx_mock)
+
+
+@pytest.mark.asyncio
+async def test_invalid_organization_policy_raises_at_construction(httpx_mock: HTTPXMock):
+    """Test that an organization_policy other than 'required' or 'allow' raises ConfigurationError."""
+    with pytest.raises(ConfigurationError, match="organization_policy must be either 'required' or 'allow'"):
+        ApiClient(ApiClientOptions(
+            domain="auth0.local",
+            audience="my-audience",
+            organization_policy="none",
         ))
 
     assert_no_requests(httpx_mock)

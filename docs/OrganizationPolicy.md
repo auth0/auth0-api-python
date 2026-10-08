@@ -49,7 +49,7 @@ api_client = ApiClient(ApiClientOptions(
 ))
 ```
 
-`organization_id` compares the opaque `org_id` claim value directly (string comparison, no network call). It does not accept or resolve the human-readable Organization name.
+`organization_id` compares the opaque `org_id` claim value directly (string comparison, no network call). It does not accept or resolve the human-readable Organization name. It must be a non-empty string or a non-empty list of non-empty strings, otherwise `ConfigurationError` is raised at construction.
 
 ## Error Handling
 
@@ -85,7 +85,7 @@ try:
 except MissingOrganizationError as e:
     print(e)            # "Token missing required 'org_id' claim"
     e.get_status_code() # 401
-    e.get_error_code()  # "missing_organization"
+    e.get_error_code()  # "invalid_token"
 ```
 
 ### Organization Not Allowed
@@ -98,10 +98,10 @@ from auth0_api_python import OrganizationNotAllowedError
 try:
     claims = await api_client.verify_access_token(access_token)
 except OrganizationNotAllowedError as e:
-    print(e)            # "Organization 'org_xyz' is not in the allowed list"
+    print(e)            # "Token org_id is not in the allowed list"
     e.get_status_code() # 401
-    e.get_error_code()  # "organization_not_allowed"
+    e.get_error_code()  # "invalid_token"
 ```
 
 > [!NOTE]
-> `MissingOrganizationError` and `OrganizationNotAllowedError` are both subclasses of `VerifyAccessTokenError`. `WWW-Authenticate` response headers (via `get_headers()`) are only populated when the token is verified through `verify_request()`, which wraps these errors before re-raising. Calling `verify_access_token()` directly does not attach response headers.
+> `MissingOrganizationError` and `OrganizationNotAllowedError` are both subclasses of `VerifyAccessTokenError`, so they carry the same `invalid_token` error code and 401 status. The rejected `org_id` is not included in the error message or response headers. It is logged as a warning instead. `WWW-Authenticate` response headers (via `get_headers()`) are only populated when the token is verified through `verify_request()`, which wraps these errors before re-raising. Calling `verify_access_token()` directly does not attach response headers.
