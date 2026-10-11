@@ -65,6 +65,22 @@ async def test_init_missing_args():
         _ = ApiClient(ApiClientOptions(domain="example.us.auth0.com", audience=""))
 
 
+def test_custom_jwt_algorithms():
+    client = ApiClient(ApiClientOptions(
+        domain="example.us.auth0.com",
+        audience="my-audience",
+        jwt_algorithms=["RS384", "RS512"],
+    ))
+
+    assert client._jwt_algorithms == ["RS384", "RS512"]
+    with pytest.raises(ConfigurationError):
+        ApiClient(ApiClientOptions(
+            domain="example.us.auth0.com",
+            audience="my-audience",
+            jwt_algorithms=[],
+        ))
+
+
 @pytest.mark.asyncio
 async def test_verify_access_token_successfully(httpx_mock: HTTPXMock):
     """

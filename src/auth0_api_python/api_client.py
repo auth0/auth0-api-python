@@ -4,7 +4,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Optional, Union
 
 import httpx
-from authlib.jose import JsonWebKey, JsonWebToken
+from joserfc import jwk, jwt
 
 from .cache import InMemoryCache
 from .config import ApiClientOptions
@@ -60,6 +60,12 @@ class ApiClient:
         if not options.audience:
             raise MissingRequiredArgumentError("audience")
 
+        if not isinstance(options.jwt_algorithms, list) or not options.jwt_algorithms or not all(
+            isinstance(algorithm, str) and algorithm for algorithm in options.jwt_algorithms
+        ):
+            raise ConfigurationError("jwt_algorithms must be a non-empty list of algorithm names")
+        self._jwt_algorithms = options.jwt_algorithms
+
         # Validate domains parameter if provided
         if options.domains is not None:
             if isinstance(options.domains, list):
@@ -113,10 +119,7 @@ class ApiClient:
 
         self._cache_ttl = options.cache_ttl_seconds
 
-        self._jwt = JsonWebToken(["RS256"])
-
         self._dpop_algorithms = ["ES256"]
-        self._dpop_jwt = JsonWebToken(self._dpop_algorithms)
 
     def is_dpop_required(self) -> bool:
         """Check if DPoP authentication is required."""
@@ -524,12 +527,12 @@ class ApiClient:
             raise VerifyAccessTokenError("No matching key found in JWKS")
 
         # Import public key and verify signature
-        public_key = JsonWebKey.import_key(matching_key_dict)
+        public_key = jwk.import_key(matching_key_dict)
 
         if isinstance(access_token, str) and access_token.startswith("b'"):
             access_token = access_token[2:-1]
         try:
-            claims = self._jwt.decode(access_token, public_key)
+            claims = jwt.decode(access_token, public_key, algorithms=self._jwt_algorithms).claims
         except Exception as e:
             raise VerifyAccessTokenError(f"Signature verification failed: {str(e)}") from e
 
@@ -606,9 +609,9 @@ class ApiClient:
         if jwk_dict.get("crv") != "P-256":
             raise InvalidDpopProofError("Only P-256 curve is supported")
 
-        public_key = JsonWebKey.import_key(jwk_dict)
+        public_key = jwk.import_key(jwk_dict)
         try:
-            claims = self._dpop_jwt.decode(proof, public_key)
+            claims = jwt.decode(proof, public_key, algorithms=self._dpop_algorithms).claims
         except Exception as e:
             raise InvalidDpopProofError(f"JWT signature verification failed: {e}")
 
