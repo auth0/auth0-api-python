@@ -830,6 +830,7 @@ async def test_organization_policy_logs_rejected_org_id(httpx_mock: HTTPXMock, c
         await api_client.verify_access_token(access_token=token)
 
     assert "org_untrusted" in caplog.text
+    assert any(record.name == "auth0_api_python.api_client" for record in caplog.records)
 
 
 def test_organization_errors_are_exported_from_package_root():
@@ -3674,6 +3675,39 @@ async def test_get_token_on_behalf_of_verified_claims_without_sub_skips_caching(
 
 
 @pytest.mark.asyncio
+async def test_get_token_on_behalf_of_verified_claims_without_iss_skips_caching(
+    mock_discovery, api_client_confidential, httpx_mock, caplog
+):
+    """Verified claims that lack iss skip caching with a warning, so each call re-exchanges."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-1"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-2"),
+    )
+
+    caplog.set_level(logging.WARNING)
+    token = make_access_token("auth0|user1")
+    no_iss = VerifiedToken(access_token=token, claims={"sub": "auth0|user1"})
+    result1 = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token, audience="https://api.backend.com", verified=no_iss
+    )
+    result2 = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token, audience="https://api.backend.com", verified=no_iss
+    )
+
+    assert result1["access_token"] == "obo-access-token-1"
+    assert result2["access_token"] == "obo-access-token-2"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+    assert any("no iss claim" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_get_token_on_behalf_of_verified_token_mismatch_raises(
     api_client_confidential, httpx_mock
 ):
@@ -3781,7 +3815,10 @@ async def test_get_token_on_behalf_of_store_get_failure_falls_back_to_fresh_exch
     )
 
     assert result["access_token"] == "obo-access-token"
-    assert any("Token store read failed" in record.message for record in caplog.records)
+    assert any(
+        record.name == "auth0_api_python._internal.obo_cache" and "Token store read failed" in record.message
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio
@@ -4189,6 +4226,19 @@ def test_nss_requires_indexed_store():
     assert "IndexedTokenStore" in str(err.value)
 
 
+def test_nss_requires_a_token_store():
+    """non_strict with no token_store raises ConfigurationError at construction."""
+    with pytest.raises(ConfigurationError) as err:
+        ApiClient(ApiClientOptions(
+            domain="auth0.local",
+            audience="my-audience",
+            client_id="cid",
+            client_secret="csecret",
+            scope_matching="non_strict",
+        ))
+    assert "IndexedTokenStore" in str(err.value)
+
+
 @pytest.mark.httpx_mock(can_send_already_matched_responses=True)
 @pytest.mark.asyncio
 async def test_strict_and_non_strict_do_not_share_cache(mock_discovery, httpx_mock):
@@ -4230,6 +4280,25 @@ class RaisingGetIndexTokenStore(InMemoryIndexedTokenStore):
 
     async def get(self, key):
         raise RuntimeError("store unavailable")
+
+
+class CountingRaisingGetIndexTokenStore(RaisingGetIndexTokenStore):
+    """Raising indexed store that counts get() calls, to verify the lookup stops at the first failed read."""
+
+    def __init__(self):
+        super().__init__()
+        self.get_calls = 0
+
+    async def get(self, key):
+        self.get_calls += 1
+        await super().get(key)
+
+
+class NonIterableListIndexTokenStore(InMemoryIndexedTokenStore):
+    """Indexed store whose list_index_members() returns a non-iterable, to verify a bad index read is a miss."""
+
+    async def list_index_members(self, index_key):
+        return None
 
 
 class RaisingAddIndexTokenStore(InMemoryIndexedTokenStore):
@@ -4362,6 +4431,64 @@ async def test_nss_index_member_read_failure_falls_back_to_exchange(mock_discove
     assert result["access_token"] == "fresh-token"
     post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
     assert len(post_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_index_stops_at_first_failed_member_read(mock_discovery, httpx_mock):
+    """Index: after one member's token read fails, the remaining candidates are not read."""
+    store = CountingRaisingGetIndexTokenStore()
+    client = _nss_client(token_store=store)
+    token = make_access_token("auth0|user1")
+    audience = "https://api.example.com"
+
+    for scopes in ("read:x", "read:x read:y"):
+        await store.add_index_member(index_key(token, audience=audience), {
+            "token_key": index_token_key(token, audience=audience, scopes=scopes),
+            "granted_scopes": scopes,
+            "expires_at": int(time.time()) + 3600,
+        })
+
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token", scope="read:x"),
+    )
+
+    result = await client.get_token_on_behalf_of(access_token=token, audience=audience, scope="read:x", verified=verified_for(token, "auth0|user1"))
+
+    assert result["access_token"] == "fresh-token"
+    assert store.get_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_index_non_iterable_member_list_treated_as_miss(mock_discovery, httpx_mock):
+    """Index: a store returning a non-iterable member list is a miss, so a fresh exchange runs without raising."""
+    client = _nss_client(token_store=NonIterableListIndexTokenStore())
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token", scope="read:x"),
+    )
+
+    token = make_access_token("auth0|user1")
+    result = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified_for(token, "auth0|user1"))
+
+    assert result["access_token"] == "fresh-token"
+
+
+@pytest.mark.asyncio
+async def test_nss_index_whitespace_scope_is_never_served_from_cache(mock_discovery, httpx_mock):
+    """Index: a whitespace-only scope is unscoped, so it never reuses a cached token."""
+    client = _nss_client()
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="scoped-token", scope="read:x"))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="unscoped-token"))
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+    result = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="   ", verified=verified)
+
+    assert result["access_token"] == "unscoped-token"
 
 
 @pytest.mark.asyncio

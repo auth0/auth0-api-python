@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from typing import Any, Optional, TypedDict
 
 from .encryption import decrypt, encrypt
+from .errors import ConfigurationError
+
+_MIN_SECRET_LENGTH = 32
 
 
 class _TokenSetRequired(TypedDict):
@@ -31,6 +34,15 @@ class AbstractTokenStore(ABC):
     """Base class for external token stores with built-in JWE encrypt and decrypt helpers."""
 
     def __init__(self, *, secret: str) -> None:
+        """
+        Args:
+            secret: Encryption secret of at least 32 characters, for example the output of `openssl rand -hex 32`.
+
+        Raises:
+            ConfigurationError: If secret is blank or shorter than 32 characters.
+        """
+        if not secret or len(secret.strip()) < _MIN_SECRET_LENGTH:
+            raise ConfigurationError(f"secret must be at least {_MIN_SECRET_LENGTH} characters, for example the output of `openssl rand -hex 32`")
         self._secret = secret
 
     @abstractmethod

@@ -41,6 +41,8 @@ from .utils import (
     sha256_base64url,
 )
 
+logger = logging.getLogger(__name__)
+
 # Token Exchange constants
 TOKEN_EXCHANGE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:token-exchange"  # noqa: S105
 OBO_ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"  # noqa: S105
@@ -140,7 +142,6 @@ class ApiClient:
             )
         if (
             options.scope_matching == "non_strict"
-            and options.token_store is not None
             and not isinstance(options.token_store, IndexedTokenStore)
         ):
             raise ConfigurationError(
@@ -626,7 +627,7 @@ class ApiClient:
             if not isinstance(org_id, str) or not org_id:
                 raise MissingOrganizationError("Token missing required 'org_id' claim")
             if self._allowed_org_ids is not None and org_id not in self._allowed_org_ids:
-                logging.warning("Rejected token with org_id %r not in the organization_id allowlist", org_id)
+                logger.warning("Rejected token with org_id %r not in the organization_id allowlist", org_id)
                 raise OrganizationNotAllowedError("Token org_id is not in the allowed list")
 
         return claims
@@ -1054,7 +1055,8 @@ class ApiClient:
             scope: Optional space-separated OAuth 2.0 scopes to request
             verified: The already-verified token, supplied by a caller that has verified it (for
                       example an MCP server). When omitted and a token_store is configured, the
-                      token is verified here before any cache lookup.
+                      token is verified here before any cache lookup. Its claims must carry sub
+                      and iss, otherwise caching is skipped with a warning.
 
         Returns:
             Dictionary containing:
@@ -1073,8 +1075,8 @@ class ApiClient:
         Raises:
             MissingRequiredArgumentError: If required parameters are missing
             VerifyAccessTokenError: If a store is configured and either verified is omitted and the token fails verification, or verified is supplied but does not match the access token being exchanged
-            MissingOrganizationError: If organization_policy is "required" and the token has no org_id claim
-            OrganizationNotAllowedError: If the token's org_id is not in the organization_id allowlist
+            MissingOrganizationError: If a store is configured, verified is omitted, organization_policy is "required" and the token has no org_id claim
+            OrganizationNotAllowedError: If a store is configured, verified is omitted and the token's org_id is not in the organization_id allowlist
             GetTokenByExchangeProfileError: If client credentials are not configured or validation fails
             ApiError: If the token endpoint returns an error
         """

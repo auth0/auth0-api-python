@@ -89,7 +89,7 @@ class RedisTokenStore(AbstractTokenStore):
 
     async def set(self, key: str, value: TokenSet) -> None:
         encrypted = self.encrypt(key, value)
-        ttl = max(value["expires_at"] - int(time.time()), 0)
+        ttl = max(value["expires_at"] - int(time.time()), 1)
         await self.redis.set(key, encrypted, ex=ttl)
 
     async def delete(self, key: str) -> None:
@@ -115,6 +115,10 @@ They use HKDF-SHA256 to derive a per-entry encryption key from `secret` and the 
 wrap the token in a JWE using `alg: dir` and `enc: A256CBC-HS512`. A fresh random `kid` is
 generated on every write, so two encryptions of the same value produce different ciphertext.
 
+`secret` must be at least 32 characters, and a blank or shorter one raises `ConfigurationError`
+when the store is created. Generate one with `openssl rand -hex 32`. HKDF adds no work factor, so
+the length of `secret` is the only protection against guessing it.
+
 `secret` must be kept outside your codebase, for example in an environment variable or a secrets
 manager. Rotating it invalidates all existing cached entries, which is safe because the SDK falls
 back to a fresh exchange on any cache miss or decryption failure.
@@ -135,8 +139,8 @@ index of the scopes each one was granted, so any cached token whose scopes cover
 be reused. The index is maintained with an atomic add so that several server processes can write
 to it at once without losing each other's entries. A plain `AbstractTokenStore` cannot offer that,
 so non_strict requires a store that subclasses `IndexedTokenStore` and implements
-`add_index_member` and `list_index_members`. Using non_strict with a plain store raises
-`ConfigurationError` at construction.
+`add_index_member` and `list_index_members`. Using non_strict with a plain store, or with
+no `token_store` at all, raises `ConfigurationError` at construction.
 
 ### Redis IndexedTokenStore example
 

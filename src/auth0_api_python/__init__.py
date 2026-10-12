@@ -16,7 +16,6 @@ from .errors import (
     GetTokenByExchangeProfileError,
     MissingOrganizationError,
     OrganizationNotAllowedError,
-    TokenStoreError,
 )
 from .token_store import (
     AbstractTokenStore,
@@ -41,7 +40,6 @@ __all__ = [
     "DomainsResolverContext",
     "DomainsResolverError",
     "GetTokenByExchangeProfileError",
-    "TokenStoreError",
     "get_current_actor",
     "get_delegation_chain",
     "InMemoryCache",
