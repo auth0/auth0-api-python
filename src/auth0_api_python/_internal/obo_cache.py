@@ -4,7 +4,6 @@ import logging
 import time
 from typing import NamedTuple, Optional, cast
 
-from ..errors import TokenStoreError
 from ..token_store import (
     AbstractTokenStore,
     IndexedTokenStore,
@@ -19,6 +18,8 @@ from .cache_keys import (
     obo_cache_key,
     session_fingerprint,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class _OboIdentity(NamedTuple):
@@ -57,11 +58,11 @@ class OboCache:
         claims = verified.claims
         sub = claims.get("sub")
         if not isinstance(sub, str) or not sub:
-            logging.warning("Verified token has no usable sub claim, skipping cache")
+            logger.warning("Verified token has no usable sub claim, skipping cache")
             return None
         issuer = claims.get("iss")
         if not isinstance(issuer, str) or not issuer:
-            logging.warning("Verified token has no iss claim, skipping cache")
+            logger.warning("Verified token has no iss claim, skipping cache")
             return None
         org_id = claims.get("org_id") if isinstance(claims.get("org_id"), str) else None
         incoming = claims.get("azp") or claims.get("client_id")
@@ -108,8 +109,7 @@ class OboCache:
             else:
                 await self._store.set(self._token_key(identity, audience, "strict", granted), entry)
         except Exception as exc:
-            store_err = TokenStoreError("Token store write failed", cause=exc)
-            logging.warning("Token store write failed, token still returned: %s", store_err.cause)
+            logger.warning("Token store write failed, token still returned: %s", exc)
 
     # ===== Private methods =====
 
@@ -139,13 +139,10 @@ class OboCache:
             session_key=identity.session_key,
         )
 
-    async def _store_get(self, key: str) -> Optional[TokenSet]:
-        try:
-            return await self._store.get(key)
-        except Exception as exc:
-            store_err = TokenStoreError("Token store read failed", cause=exc)
-            logging.warning("Token store read failed, treating as cache miss: %s", store_err.cause)
-            return None
+    @staticmethod
+    def _warn_read_failed(exc: Exception) -> None:
+        # A bad secret or tampered entry fails inside the store's decrypt, so it surfaces here too.
+        logger.warning("Token store read failed or entry was unreadable, treating as cache miss: %s", exc)
 
     @staticmethod
     def _well_formed_member(member: object) -> bool:
@@ -162,15 +159,15 @@ class OboCache:
         if cached is None:
             return False
         if "access_token" not in cached or "expires_at" not in cached:
-            logging.warning("Token store returned a malformed entry, treating as cache miss")
+            logger.warning("Token store returned a malformed entry, treating as cache miss")
             return False
         return cached["expires_at"] > now
 
     @staticmethod
-    def _hit(cached: TokenSet) -> OnBehalfOfTokenResult:
+    def _hit(cached: TokenSet, now: int) -> OnBehalfOfTokenResult:
         result: OnBehalfOfTokenResult = {
             "access_token": cached["access_token"],
-            "expires_in": cached["expires_at"] - int(time.time()),
+            "expires_in": cached["expires_at"] - now,
             "expires_at": cached["expires_at"],
         }
         granted = cached.get("granted_scopes")
@@ -181,41 +178,51 @@ class OboCache:
     async def _strict_lookup(
         self, identity: _OboIdentity, audience: str, scope: Optional[str]
     ) -> Optional[OnBehalfOfTokenResult]:
-        cached = await self._store_get(self._token_key(identity, audience, "strict", scope))
-        if not self._usable_entry(cached, int(time.time())):
+        now = int(time.time())
+        try:
+            cached = await self._store.get(self._token_key(identity, audience, "strict", scope))
+        except Exception as exc:
+            self._warn_read_failed(exc)
+            return None
+        if not self._usable_entry(cached, now):
             return None
         # Entries are stored under their granted-scope key, so confirm the grant matches exactly.
         if _normalized_scopes(cached.get("granted_scopes")) != _normalized_scopes(scope):
             return None
-        return self._hit(cached)
+        return self._hit(cached, now)
 
     async def _index_lookup(
         self, identity: _OboIdentity, audience: str, scope: Optional[str]
     ) -> Optional[OnBehalfOfTokenResult]:
         # An unscoped request is covered by every cached token, so never reuse for one.
-        if not scope:
+        requested_scopes = _normalized_scopes(scope)
+        if not requested_scopes:
             return None
         now = int(time.time())
         indexed = cast(IndexedTokenStore, self._store)
         try:
             members = await indexed.list_index_members(self._index_key(identity, audience))
+            candidates = [
+                m for m in members
+                if self._well_formed_member(m) and m["expires_at"] > now and is_covered_by(scope, m["granted_scopes"])
+            ]
         except Exception as exc:
-            store_err = TokenStoreError("Token store read failed", cause=exc)
-            logging.warning("Token store read failed, treating as cache miss: %s", store_err.cause)
+            self._warn_read_failed(exc)
             return None
-        requested = set(_normalized_scopes(scope).split())
-        candidates = [
-            m for m in members
-            if self._well_formed_member(m) and m["expires_at"] > now and is_covered_by(scope, m["granted_scopes"])
-        ]
+        requested = set(requested_scopes.split())
         # Prefer an exact grant, then the covering grant with the fewest extra scopes.
         candidates.sort(key=lambda m: len(set(_normalized_scopes(m["granted_scopes"]).split()) - requested))
         for member in candidates:
-            cached = await self._store_get(member["token_key"])
+            # A failing store would fail every remaining read too, so stop at the first one.
+            try:
+                cached = await self._store.get(member["token_key"])
+            except Exception as exc:
+                self._warn_read_failed(exc)
+                return None
             if not self._usable_entry(cached, now):
                 continue
             # Trust the token value's own grant, not only the index label.
             if not is_covered_by(scope, cached.get("granted_scopes")):
                 continue
-            return self._hit(cached)
+            return self._hit(cached, now)
         return None

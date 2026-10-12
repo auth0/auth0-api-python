@@ -62,10 +62,10 @@ the [RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693#section-2.1) `subje
 
 ### Caching the Exchanged Token
 
-To cache the exchanged token, pass a `token_store` when constructing `ApiClient`. Caching activates automatically once a store is configured. The SDK reads `sub` from the incoming token to build the cache key, so no additional argument is needed on each call.
+To cache the exchanged token, pass a `token_store` when constructing `ApiClient`. Caching activates automatically once a store is configured. The SDK builds the cache key from the verified `sub` and `iss` claims. Pass the token you already verified as `verified` so it is not verified a second time, otherwise `get_token_on_behalf_of()` verifies it before the cache lookup.
 
 ```python
-from auth0_api_python import ApiClient, ApiClientOptions
+from auth0_api_python import ApiClient, ApiClientOptions, VerifiedToken
 
 # token_store is your AbstractTokenStore implementation (e.g. Redis-backed).
 # See docs/TokenStorage.md for how to build one.
@@ -83,6 +83,7 @@ result = await api_client.get_token_on_behalf_of(
     access_token=incoming_access_token,
     audience="https://calendar-api.example.com",
     scope="calendar:read calendar:write",
+    verified=VerifiedToken(access_token=incoming_access_token, claims=claims),
 )
 ```
 

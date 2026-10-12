@@ -21,7 +21,7 @@ from auth0_api_python.token_store import (
 class InMemoryTokenStore(AbstractTokenStore):
     """Minimal in-memory store for tests. Not for production use."""
 
-    def __init__(self, *, secret: str = "test-secret") -> None:  # noqa: S107
+    def __init__(self, *, secret: str = "test-secret-0123456789abcdef-0123456789") -> None:  # noqa: S107
         super().__init__(secret=secret)
         self._store: dict[str, TokenSet] = {}
 
@@ -44,7 +44,7 @@ class InMemoryTokenStore(AbstractTokenStore):
 class InMemoryIndexedTokenStore(InMemoryTokenStore, IndexedTokenStore):
     """In-memory IndexedTokenStore for tests. Not for production use."""
 
-    def __init__(self, *, secret: str = "test-secret") -> None:  # noqa: S107
+    def __init__(self, *, secret: str = "test-secret-0123456789abcdef-0123456789") -> None:  # noqa: S107
         super().__init__(secret=secret)
         self._index: dict[str, dict[str, TokenIndexMember]] = {}
 

@@ -46,7 +46,7 @@ class ApiClientOptions:
                         "strict" (default) reuses a cached token only on an exact granted-scope
                         match. "non_strict" reuses any cached token whose granted scopes cover
                         the request, and requires a token_store subclassing IndexedTokenStore
-                        (raises ConfigurationError at construction otherwise).
+                        (raises ConfigurationError at construction without one).
     """
     def __init__(
             self,

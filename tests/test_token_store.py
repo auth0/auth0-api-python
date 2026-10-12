@@ -1,4 +1,6 @@
+import base64
 import hashlib
+import json
 import time
 from typing import Optional
 
@@ -12,6 +14,7 @@ from auth0_api_python._internal.cache_keys import (
     session_fingerprint,
     token_vault_cache_key,
 )
+from auth0_api_python.errors import ConfigurationError
 from auth0_api_python.token_store import (
     AbstractTokenStore,
     TokenSet,
@@ -24,7 +27,7 @@ from auth0_api_python.token_utils import generate_token
 class ConcreteTokenStore(AbstractTokenStore):
     """Minimal concrete store for testing the ABC and its helpers."""
 
-    def __init__(self, *, secret: str = "test-secret") -> None:  # noqa: S107
+    def __init__(self, *, secret: str = "test-secret-0123456789abcdef-0123456789") -> None:  # noqa: S107
         super().__init__(secret=secret)
         self._store: dict[str, str] = {}
 
@@ -82,7 +85,7 @@ async def test_abstract_token_store_delete_missing_key_is_noop():
 
 def test_encrypt_decrypt_roundtrip():
     """encrypt/decrypt helpers round-trip a TokenSet back to the original dict."""
-    store = ConcreteTokenStore(secret="some-secret")
+    store = ConcreteTokenStore(secret="some-secret-0123456789abcdef-0123456789")
     value: TokenSet = {"access_token": "tok", "expires_at": 9999999}
 
     encrypted = store.encrypt("cache-key", value)
@@ -93,7 +96,7 @@ def test_encrypt_decrypt_roundtrip():
 
 def test_encrypt_different_cache_keys_produce_different_ciphertext():
     """Two entries with the same value but different keys produce different ciphertext."""
-    store = ConcreteTokenStore(secret="some-secret")
+    store = ConcreteTokenStore(secret="some-secret-0123456789abcdef-0123456789")
     value: TokenSet = {"access_token": "tok", "expires_at": 9999999}
 
     enc1 = store.encrypt("key-a", value)
@@ -104,8 +107,8 @@ def test_encrypt_different_cache_keys_produce_different_ciphertext():
 
 def test_encrypt_different_secrets_produce_different_ciphertext():
     """Two stores with different secrets produce different ciphertext for the same payload."""
-    store_a = ConcreteTokenStore(secret="secret-a")
-    store_b = ConcreteTokenStore(secret="secret-b")
+    store_a = ConcreteTokenStore(secret="secret-a-0123456789abcdef-0123456789")
+    store_b = ConcreteTokenStore(secret="secret-b-0123456789abcdef-0123456789")
     value: TokenSet = {"access_token": "tok", "expires_at": 9999999}
 
     enc_a = store_a.encrypt("key", value)
@@ -116,13 +119,27 @@ def test_encrypt_different_secrets_produce_different_ciphertext():
 
 def test_encrypt_same_inputs_produce_different_ciphertext_each_call():
     """Each encrypt call produces unique ciphertext due to the random kid per call."""
-    store = ConcreteTokenStore(secret="some-secret")
+    store = ConcreteTokenStore(secret="some-secret-0123456789abcdef-0123456789")
     value: TokenSet = {"access_token": "tok", "expires_at": 9999999}
 
     enc1 = store.encrypt("key", value)
     enc2 = store.encrypt("key", value)
 
     assert enc1 != enc2
+
+
+@pytest.mark.parametrize("secret", ["", "   ", " " * 40, "x" * 31, "x" * 31 + " " * 5])
+def test_abstract_token_store_rejects_blank_or_short_secret(secret):
+    """A blank, whitespace-only, or under-32-character secret raises ConfigurationError at construction."""
+    with pytest.raises(ConfigurationError) as err:
+        ConcreteTokenStore(secret=secret)
+
+    assert "32 characters" in str(err.value)
+
+
+def test_abstract_token_store_accepts_32_character_secret():
+    """A secret of exactly 32 characters is accepted."""
+    ConcreteTokenStore(secret="x" * 32)
 
 
 # ===== obo_cache_key =====
@@ -293,6 +310,14 @@ async def test_session_fingerprint_falls_back_to_sha256_when_no_sid_or_jti():
     expected = hashlib.sha256(token.encode()).hexdigest()
 
     assert session_fingerprint(token) == expected
+
+
+def test_session_fingerprint_falls_back_to_sha256_for_non_object_payload():
+    """A token whose payload decodes to JSON that is not an object falls back to sha256 without raising."""
+    payload = base64.urlsafe_b64encode(json.dumps(["sid", "jti"]).encode()).rstrip(b"=").decode()
+    token = f"hdr.{payload}.sig"
+
+    assert session_fingerprint(token) == hashlib.sha256(token.encode()).hexdigest()
 
 
 def test_session_fingerprint_falls_back_to_sha256_for_malformed_token():
