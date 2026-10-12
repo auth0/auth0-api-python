@@ -25,7 +25,6 @@ from .errors import (
     MissingOrganizationError,
     MissingRequiredArgumentError,
     OrganizationNotAllowedError,
-    TokenStoreError,
     VerifyAccessTokenError,
 )
 from .token_store import (
@@ -1173,12 +1172,11 @@ class ApiClient:
             try:
                 cached = await self._token_store.get(cache_key)
             except Exception as exc:
-                store_err = TokenStoreError("Token store read failed", cause=exc)
-                logging.warning("Token store read failed, treating as cache miss: %s", store_err.cause)
+                logger.warning("Token store read failed, treating as cache miss: %s", exc)
 
             if cached is not None:
                 if "access_token" not in cached or "expires_at" not in cached:
-                    logging.warning("Token store returned a malformed entry, treating as cache miss")
+                    logger.warning("Token store returned a malformed entry, treating as cache miss")
                 elif cached["expires_at"] > int(time.time()):
                     hit: ClientCredentialsTokenResult = {
                         "access_token": cached["access_token"],
@@ -1268,8 +1266,7 @@ class ApiClient:
                     entry["granted_scopes"] = cc_result["scope"]
                 await self._token_store.set(cache_key, entry)
             except Exception as exc:
-                store_err = TokenStoreError("Token store write failed", cause=exc)
-                logging.warning("Token store write failed, token still returned: %s", store_err.cause)
+                logger.warning("Token store write failed, token still returned: %s", exc)
 
         return cc_result
 
