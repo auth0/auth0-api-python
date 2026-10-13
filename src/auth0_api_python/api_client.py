@@ -1150,7 +1150,7 @@ class ApiClient:
         Raises:
             MissingRequiredArgumentError: If audience is not provided
             GetClientCredentialsTokenError: If client credentials are not configured or token endpoint is missing
-            ApiError: If the token endpoint returns an error
+            ApiError: If the token endpoint returns an error or a malformed response
         """
         if not audience:
             raise MissingRequiredArgumentError("audience")
@@ -1183,8 +1183,10 @@ class ApiClient:
                         "expires_in": cached["expires_at"] - int(time.time()),
                         "expires_at": cached["expires_at"],
                     }
-                    if cached.get("granted_scopes"):
+                    if "granted_scopes" in cached:
                         hit["scope"] = cached["granted_scopes"]
+                    if "token_type" in cached:
+                        hit["token_type"] = cached["token_type"]
                     return hit
 
         metadata = await self._discover()
@@ -1226,11 +1228,19 @@ class ApiClient:
                         response.status_code
                     )
 
-                token_response = response.json()
+                # Auth0 always sends both fields, so a missing expires_in is an error rather than a guessed lifetime.
+                try:
+                    token_response = response.json()
+                    access_token = token_response["access_token"]
+                    expires_in = int(token_response["expires_in"])
+                except (ValueError, KeyError, TypeError):
+                    raise ApiError("invalid_response", "Token endpoint returned a malformed response.", 502)
 
-                expires_in = token_response["expires_in"]
-                cc_result = {
-                    "access_token": token_response["access_token"],
+                if not isinstance(access_token, str) or not access_token:
+                    raise ApiError("invalid_response", "Missing or invalid access_token in response.", 502)
+
+                cc_result: ClientCredentialsTokenResult = {
+                    "access_token": access_token,
                     "expires_in": expires_in,
                     "expires_at": int(time.time()) + expires_in,
                 }
@@ -1264,6 +1274,8 @@ class ApiClient:
                 }
                 if "scope" in cc_result:
                     entry["granted_scopes"] = cc_result["scope"]
+                if "token_type" in cc_result:
+                    entry["token_type"] = cc_result["token_type"]
                 await self._token_store.set(cache_key, entry)
             except Exception as exc:
                 logger.warning("Token store write failed, token still returned: %s", exc)

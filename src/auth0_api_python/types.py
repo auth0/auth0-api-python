@@ -72,6 +72,7 @@ class ClientCredentialsTokenResult(TypedDict, total=False):
     scope: str
     token_type: str
 
+
 DomainsResolver = Callable[
     [DomainsResolverContext], Union[list[str], Awaitable[list[str]]]
 ]
