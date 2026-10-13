@@ -32,6 +32,7 @@ from auth0_api_python import (
 from auth0_api_python import __all__ as package_exports
 from auth0_api_python._internal.cache_keys import (
     index_cache_key,
+    m2m_cache_key,
     obo_cache_key,
     session_fingerprint,
 )
@@ -42,6 +43,7 @@ from auth0_api_python.errors import (
     ConfigurationError,
     DomainsResolverError,
     GetAccessTokenForConnectionError,
+    GetClientCredentialsTokenError,
     GetTokenByExchangeProfileError,
     InvalidAuthSchemeError,
     InvalidDpopProofError,
@@ -3466,6 +3468,209 @@ async def test_get_token_on_behalf_of_empty_access_token(api_client_confidential
         )
 
 
+# ===== Client Credentials (M2M) Tests =====
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_success(mock_discovery, api_client_confidential, httpx_mock):
+    """Test successful M2M exchange: correct grant_type, HTTP Basic auth, and result shape."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json={
+            "access_token": "m2m-access-token",
+            "token_type": "Bearer",
+            "expires_in": 86400,
+        }
+    )
+
+    result = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+
+    assert result["access_token"] == "m2m-access-token"
+    assert result["expires_in"] == 86400
+    assert isinstance(result["expires_at"], int)
+    assert result["token_type"] == "Bearer"
+
+    assert_form_post(
+        httpx_mock,
+        expect_fields={
+            "grant_type": ["client_credentials"],
+            "audience": ["https://billing-api.example.com"],
+            "scope": ["admin:billing"],
+        },
+        forbid_fields=["client_id", "client_secret"],
+        expect_basic_auth=("cid", "csecret"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_missing_credentials():
+    """Test that M2M raises GetClientCredentialsTokenError when credentials are not configured."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+    ))
+
+    with pytest.raises(GetClientCredentialsTokenError) as err:
+        await api_client.get_client_credentials_token(audience="https://billing-api.example.com")
+
+    assert "client credentials are required" in str(err.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_missing_audience(api_client_confidential):
+    """Test that M2M raises MissingRequiredArgumentError when audience is not provided."""
+    with pytest.raises(MissingRequiredArgumentError):
+        await api_client_confidential.get_client_credentials_token(audience="")
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_api_error(mock_discovery, api_client_confidential, httpx_mock):
+    """Test that a token endpoint error surfaces as ApiError (functional requirements scenario 8)."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        status_code=400,
+        json={
+            "error": "access_denied",
+            "error_description": "Client not authorized for this audience",
+        }
+    )
+
+    with pytest.raises(ApiError) as err:
+        await api_client_confidential.get_client_credentials_token(
+            audience="https://billing-api.example.com",
+        )
+
+    assert err.value.code == "access_denied"
+    assert err.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_no_scope_in_response(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that a response without a scope field is handled without error."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json={
+            "access_token": "m2m-access-token",
+            "token_type": "Bearer",
+            "expires_in": 86400,
+            # no "scope" field, matching the documented Auth0 M2M response shape
+        }
+    )
+
+    result = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+    )
+
+    assert result["access_token"] == "m2m-access-token"
+    assert "scope" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response_kwargs",
+    [
+        {"content": b"not json"},
+        {"json": ["not", "an", "object"]},
+        {"json": {"expires_in": 3600}},
+        {"json": {"access_token": "", "expires_in": 3600}},
+        {"json": {"access_token": "t"}},
+        {"json": {"access_token": "t", "expires_in": "soon"}},
+    ],
+)
+async def test_get_client_credentials_token_malformed_response(
+    mock_discovery, api_client_confidential, httpx_mock, response_kwargs
+):
+    """A malformed 200 response surfaces as ApiError instead of a raw ValueError or KeyError."""
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, **response_kwargs)
+
+    with pytest.raises(ApiError) as err:
+        await api_client_confidential.get_client_credentials_token(
+            audience="https://billing-api.example.com",
+        )
+
+    assert err.value.code == "invalid_response"
+    assert err.value.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_missing_token_endpoint(httpx_mock, api_client_confidential):
+    """Test that discovery metadata without a token_endpoint raises GetClientCredentialsTokenError."""
+    httpx_mock.add_response(method="GET", url=DISCOVERY_URL, json={})
+
+    with pytest.raises(GetClientCredentialsTokenError) as err:
+        await api_client_confidential.get_client_credentials_token(
+            audience="https://billing-api.example.com",
+        )
+
+    assert "token endpoint missing" in str(err.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_without_token_store_never_caches(
+    mock_discovery, api_client_confidential_no_store, httpx_mock
+):
+    """Without a token_store every call performs its own exchange."""
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="first"))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="second"))
+
+    r1 = await api_client_confidential_no_store.get_client_credentials_token(
+        audience="https://billing-api.example.com", scope="admin:billing")
+    r2 = await api_client_confidential_no_store.get_client_credentials_token(
+        audience="https://billing-api.example.com", scope="admin:billing")
+
+    assert r1["access_token"] == "first"
+    assert r2["access_token"] == "second"
+    assert len([r for r in httpx_mock.get_requests() if r.method == "POST"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_timeout_error(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that a token endpoint timeout surfaces as ApiError."""
+    httpx_mock.add_exception(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        exception=httpx.TimeoutException("Request timed out")
+    )
+
+    with pytest.raises(ApiError) as err:
+        await api_client_confidential.get_client_credentials_token(
+            audience="https://billing-api.example.com",
+        )
+
+    assert err.value.code == "timeout_error"
+    assert "timed out" in str(err.value)
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_network_error(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that a token endpoint network failure surfaces as ApiError."""
+    httpx_mock.add_exception(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        exception=httpx.RequestError("Network unreachable", request=httpx.Request("POST", TOKEN_ENDPOINT))
+    )
+
+    with pytest.raises(ApiError) as err:
+        await api_client_confidential.get_client_credentials_token(
+            audience="https://billing-api.example.com",
+        )
+
+    assert err.value.code == "network_error"
+    assert "network error" in str(err.value).lower()
+
+
 # ===== Token Storage Tests =====
 
 # ----- OBO -----
@@ -4033,6 +4238,257 @@ async def test_obo_different_issuer_does_not_share_cache(mock_discovery, api_cli
     assert r2["access_token"] == "issuer-b-token"
     posts = [r for r in httpx_mock.get_requests() if r.method == "POST"]
     assert len(posts) == 2
+
+
+# ----- M2M -----
+
+
+class _RaisingGetTokenStore(InMemoryTokenStore):
+    """Token store whose get() always raises, to verify read failures fall back to a fresh exchange."""
+
+    async def get(self, key):
+        raise RuntimeError("store unavailable")
+
+
+class _RaisingSetTokenStore(InMemoryTokenStore):
+    """Token store whose set() always raises, to verify write failures don't fail the caller."""
+
+    async def set(self, key, value):
+        raise RuntimeError("store unavailable")
+
+
+class _StubStaleEntryTokenStore(InMemoryTokenStore):
+    """Token store that returns entries without checking expires_at, so the SDK's own expiry check runs."""
+
+    async def get(self, key):
+        return self._store.get(key)
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_cache_hit(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Cache hit: two calls for the same audience+scope perform only one network exchange.
+
+    MUTATION-CHECKED: disabling the cache check (e.g. setting _token_store = None) causes
+    this test to fail because a second POST is made and len(token_requests) == 2 != 1.
+    """
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="m2m-access-token"),
+    )
+
+    result1 = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+    result2 = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+
+    assert result1["access_token"] == "m2m-access-token"
+    assert result2["access_token"] == "m2m-access-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_cache_hit_returns_granted_scope(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """A cache hit returns the same scope Auth0 granted on the original exchange."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="m2m-access-token", scope="admin:billing read:billing"),
+    )
+
+    miss = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+    hit = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+
+    assert miss["scope"] == "admin:billing read:billing"
+    assert hit["scope"] == miss["scope"]
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_cache_hit_without_scope_in_response(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """A cache hit has no scope when Auth0 did not return one, matching the fresh exchange."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="m2m-access-token"),
+    )
+
+    await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+    hit = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+
+    assert "scope" not in hit
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_cache_hit_matches_fresh_result(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """A cache hit returns the same fields as the fresh exchange, including token_type and an empty scope."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="m2m-access-token", token_type="Bearer", scope=""),
+    )
+
+    miss = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+    hit = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+
+    assert hit["token_type"] == "Bearer"
+    assert hit["scope"] == ""
+    assert set(hit) == set(miss)
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_different_scope_is_a_cache_miss(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """The same audience with a different scope does not reuse the cached token."""
+    audience = "https://billing-api.example.com"
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="read-token"))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="write-token"))
+
+    r1 = await api_client_confidential.get_client_credentials_token(audience=audience, scope="read:billing")
+    r2 = await api_client_confidential.get_client_credentials_token(audience=audience, scope="write:billing")
+
+    assert r1["access_token"] == "read-token"
+    assert r2["access_token"] == "write-token"
+    assert len([r for r in httpx_mock.get_requests() if r.method == "POST"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_cache_miss_after_expiry(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that an expired cached M2M entry triggers a fresh exchange."""
+    audience = "https://billing-api.example.com"
+    cache_key = m2m_cache_key(tenant="auth0.local", client_id="cid", audience=audience, scopes="admin:billing")
+    await api_client_confidential._token_store.set(
+        cache_key,
+        {"access_token": "stale-m2m-token", "expires_at": int(time.time()) - 10},
+    )
+
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-m2m-token"),
+    )
+
+    result = await api_client_confidential.get_client_credentials_token(
+        audience=audience,
+        scope="admin:billing",
+    )
+
+    assert result["access_token"] == "fresh-m2m-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_expired_entry_from_store_is_not_served(
+    mock_discovery, httpx_mock
+):
+    """The SDK rejects an expired entry even when the store hands it back."""
+    audience = "https://billing-api.example.com"
+    store = _StubStaleEntryTokenStore()
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=store,
+    ))
+    cache_key = m2m_cache_key(tenant="auth0.local", client_id="cid", audience=audience, scopes=None)
+    await store.set(cache_key, {"access_token": "stale-m2m-token", "expires_at": int(time.time()) - 10})
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="fresh-m2m-token"))
+
+    result = await api_client.get_client_credentials_token(audience=audience)
+
+    assert result["access_token"] == "fresh-m2m-token"
+    assert len([r for r in httpx_mock.get_requests() if r.method == "POST"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_store_read_failure_falls_back(
+    mock_discovery, httpx_mock, caplog
+):
+    """Test that a store read failure falls back to a fresh exchange."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=_RaisingGetTokenStore(),
+    ))
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="m2m-access-token"),
+    )
+
+    caplog.set_level(logging.WARNING)
+    result = await api_client.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+    )
+
+    assert result["access_token"] == "m2m-access-token"
+    assert any("Token store read failed" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_store_write_failure_still_returns(
+    mock_discovery, httpx_mock, caplog
+):
+    """Test that a store write failure still returns the token."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=_RaisingSetTokenStore(),
+    ))
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="m2m-access-token"),
+    )
+
+    caplog.set_level(logging.WARNING)
+    result = await api_client.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+    )
+
+    assert result["access_token"] == "m2m-access-token"
+    assert any("Token store write failed" in record.message for record in caplog.records)
 
 
 # ----- OBO non_strict -----

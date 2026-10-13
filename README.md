@@ -255,6 +255,21 @@ Configuring a `token_store` on `ApiClientOptions` caches the exchanged token, so
 the same caller, audience, organization, scopes, and session reuses it instead of exchanging again.
 With no `token_store`, every call performs a fresh exchange, matching the existing behavior above.
 
+#### Client Credentials for Server-to-Server Calls
+
+Use `get_client_credentials_token()` to obtain an M2M access token for server-to-server calls
+using the OAuth 2.0 client credentials grant.
+
+```python
+result = await api_client.get_client_credentials_token(
+    audience="https://downstream-api.example.com",
+    scope="read:data",
+)
+# call downstream API with result["access_token"]
+```
+
+See the **[Client Credentials example](EXAMPLES.md#client-credentials-for-server-to-server-calls)** for a full example that calls a downstream API, plus the caching behavior.
+
 #### Inspecting Delegation After Token Verification
 
 When a downstream API or `MCP` server receives an access token that may have been issued through
