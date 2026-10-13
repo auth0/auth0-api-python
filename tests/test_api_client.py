@@ -5127,6 +5127,59 @@ async def test_get_access_token_for_connection_cache_hit(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("exchange_scope", [{"scope": "read:calendar"}, {}])
+async def test_get_access_token_for_connection_cache_hit_matches_fresh_result(
+    mock_discovery, api_client_confidential, httpx_mock, exchange_scope
+):
+    """A cache hit carries the same keys as a fresh result, with or without a scope in the exchange response."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-access-token", **exchange_scope),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token)
+    options = {"connection": "google-oauth2", "access_token": token}
+
+    fresh = await api_client_confidential.get_access_token_for_connection(options, verified=verified)
+    hit = await api_client_confidential.get_access_token_for_connection(options, verified=verified)
+
+    assert hit.keys() == fresh.keys()
+    assert hit["scope"] == fresh["scope"]
+    assert hit["expires_at"] == fresh["expires_at"]
+    assert 0 < hit["expires_in"] <= fresh["expires_in"]
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_different_login_hint_not_reused(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Two linked accounts on one connection each get their own token, and each hint then hits its own entry."""
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="tv-account-a"))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="tv-account-b"))
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token)
+
+    def options(hint):
+        return {"connection": "google-oauth2", "access_token": token, "login_hint": hint}
+
+    a1 = await api_client_confidential.get_access_token_for_connection(options("a@example.com"), verified=verified)
+    b1 = await api_client_confidential.get_access_token_for_connection(options("b@example.com"), verified=verified)
+    a2 = await api_client_confidential.get_access_token_for_connection(options("a@example.com"), verified=verified)
+    b2 = await api_client_confidential.get_access_token_for_connection(options("b@example.com"), verified=verified)
+
+    assert [a1["access_token"], b1["access_token"]] == ["tv-account-a", "tv-account-b"]
+    assert a2["access_token"] == "tv-account-a"
+    assert b2["access_token"] == "tv-account-b"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+
+
+@pytest.mark.asyncio
 async def test_get_access_token_for_connection_cache_miss_after_expiry(
     mock_discovery, api_client_confidential, httpx_mock
 ):
@@ -5281,6 +5334,74 @@ async def test_get_access_token_for_connection_no_sub_skips_cache(
     token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
     assert len(token_requests) == 2
     assert any("no usable sub" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_non_string_sub_skips_cache(
+    mock_discovery, api_client_confidential, httpx_mock, caplog
+):
+    """A non-string sub skips caching with a warning instead of failing the exchange."""
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="tv-token-1"))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="tv-token-2"))
+
+    token = make_access_token("auth0|user1")
+    bad_sub = VerifiedToken(access_token=token, claims={"sub": 12345, "iss": CONFIDENTIAL_ISS})
+
+    caplog.set_level(logging.WARNING)
+    result1 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token}, verified=bad_sub
+    )
+    result2 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token}, verified=bad_sub
+    )
+
+    assert result1["access_token"] == "tv-token-1"
+    assert result2["access_token"] == "tv-token-2"
+    assert any("no usable sub" in record.message for record in caplog.records)
+
+
+class _StubMalformedEntryTokenStore(InMemoryTokenStore):
+    """Token store whose get() returns a fixed entry."""
+
+    def __init__(self, entry):
+        super().__init__()
+        self._entry = entry
+
+    async def get(self, key: str):
+        return self._entry
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"access_token": "cached", "expires_at": "9999999999"},
+        {"access_token": "cached", "expires_at": None},
+        {"access_token": "", "expires_at": 9999999999},
+        {"access_token": 123, "expires_at": 9999999999},
+    ],
+)
+async def test_get_access_token_for_connection_malformed_entry_is_a_miss(
+    mock_discovery, httpx_mock, caplog, entry
+):
+    """An entry with a wrong-typed field is treated as a miss and the exchange still succeeds."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=_StubMalformedEntryTokenStore(entry),
+    ))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="fresh-tv-token"))
+
+    token = make_access_token("auth0|user1")
+    caplog.set_level(logging.WARNING)
+    result = await api_client.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token}, verified=verified_for(token)
+    )
+
+    assert result["access_token"] == "fresh-tv-token"
+    assert any("malformed entry" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio

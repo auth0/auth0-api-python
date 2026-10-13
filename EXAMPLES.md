@@ -161,10 +161,10 @@ async with httpx.AsyncClient() as client:
 
 ### With caching
 
-Pass a `token_store` to cache the connection token. The SDK caches by `sub` (caller) and `connection`, skipping the exchange on repeat calls for the same user and provider. Pass `verified=` with the result of `verify_access_token()` to reuse that verification rather than running it again inside the exchange.
+Pass a `token_store` to cache the connection token. The SDK caches by `sub` (caller), `connection` and `login_hint`, skipping the exchange on repeat calls for the same user, provider and linked account. Pass `verified=` with a `VerifiedToken` built from the `verify_access_token()` claims to reuse that verification rather than running it again inside the exchange.
 
 ```python
-from auth0_api_python import ApiClient, ApiClientOptions
+from auth0_api_python import ApiClient, ApiClientOptions, VerifiedToken
 
 # token_store is your AbstractTokenStore implementation.
 # See docs/TokenStorage.md for how to build one and for encryption details.
@@ -179,11 +179,11 @@ api_client = ApiClient(ApiClientOptions(
 incoming_access_token = "incoming-auth0-access-token"
 
 # Verify once, then pass the result to avoid a second verification inside the exchange.
-verified = await api_client.verify_access_token(access_token=incoming_access_token)
+claims = await api_client.verify_access_token(access_token=incoming_access_token)
 
 result = await api_client.get_access_token_for_connection(
     {"connection": "google-oauth2", "access_token": incoming_access_token},
-    verified=verified,
+    verified=VerifiedToken(access_token=incoming_access_token, claims=claims),
 )
 ```
 

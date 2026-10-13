@@ -272,6 +272,7 @@ def test_token_vault_cache_key_different_inputs_different_key():
     assert token_vault_cache_key(sub="sub1", connection="conn2", tenant="", client_id="") != base
     assert token_vault_cache_key(sub="sub1", connection="conn1", tenant="t1", client_id="") != base
     assert token_vault_cache_key(sub="sub1", connection="conn1", tenant="", client_id="c1") != base
+    assert token_vault_cache_key(sub="sub1", connection="conn1", tenant="", client_id="", login_hint="a@example.com") != base
 
 
 # ===== session_fingerprint =====

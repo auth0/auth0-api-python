@@ -2,7 +2,7 @@
 
 import logging
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from ..token_store import AbstractTokenStore, TokenSet
 from .cache_keys import _normalized_scopes, token_vault_cache_key
@@ -20,12 +20,16 @@ class TokenVaultCache:
     def __init__(self, token_store: AbstractTokenStore) -> None:
         self._store = token_store
 
-    def cache_key(self, tenant: str, client_id: str, sub: Optional[str], connection: str) -> Optional[str]:
-        """Return the cache key, or None when sub is absent (cache skipped with a warning)."""
-        if not sub:
+    def cache_key(
+        self, tenant: str, client_id: str, sub: Any, connection: str, login_hint: Optional[str] = None
+    ) -> Optional[str]:
+        """Return the cache key, or None when sub is not a usable string (cache skipped with a warning)."""
+        if not isinstance(sub, str) or not sub:
             logger.warning("Access token has no usable sub claim, skipping Token Vault cache")
             return None
-        return token_vault_cache_key(sub=sub, connection=connection, tenant=tenant, client_id=client_id)
+        return token_vault_cache_key(
+            sub=sub, connection=connection, tenant=tenant, client_id=client_id, login_hint=login_hint
+        )
 
     async def lookup(self, key: str) -> Optional[dict]:
         """Return a live cached token or None. Miss cases: absent, malformed, expired."""
@@ -38,21 +42,21 @@ class TokenVaultCache:
 
         if cached is None:
             return None
-        if "access_token" not in cached or "expires_at" not in cached:
+        access_token = cached.get("access_token")
+        expires_at = cached.get("expires_at")
+        if not isinstance(access_token, str) or not access_token or not isinstance(expires_at, int):
             logger.warning("Token store returned a malformed entry, treating as cache miss")
             return None
-        if cached["expires_at"] <= int(time.time()):
+        now = int(time.time())
+        if expires_at <= now:
             return None
 
-        result = {
-            "access_token": cached["access_token"],
-            "expires_in": cached["expires_at"] - int(time.time()),
-            "expires_at": cached["expires_at"],
+        return {
+            "access_token": access_token,
+            "expires_in": expires_at - now,
+            "expires_at": expires_at,
+            "scope": cached.get("granted_scopes") or "",
         }
-        granted = cached.get("granted_scopes")
-        if granted:
-            result["scope"] = granted
-        return result
 
     async def write(self, key: str, result: dict) -> None:
         """Store a freshly exchanged connection token. Failures are logged and swallowed."""
