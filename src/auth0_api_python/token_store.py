@@ -20,6 +20,7 @@ class TokenSet(_TokenSetRequired, total=False):
     """A minted access token and its absolute expiration, as stored by a TokenStore."""
 
     granted_scopes: str
+    token_type: str
 
 
 @dataclass(frozen=True)
