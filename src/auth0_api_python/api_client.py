@@ -752,6 +752,8 @@ class ApiClient:
             GetAccessTokenForConnectionError: If there was an issue requesting the access token.
             ApiError: If the token exchange endpoint returns an error.
             VerifyAccessTokenError: If a store is configured and either verified is omitted and the token fails verification, or verified is supplied but does not match the access token being exchanged.
+            MissingOrganizationError: If a store is configured, verified is omitted, organization_policy is "required" and the token has no org_id claim.
+            OrganizationNotAllowedError: If a store is configured, verified is omitted and the token's org_id is not in the organization_id allowlist.
 
         Returns:
             Dictionary containing the token response with access_token, expires_in, and scope.
@@ -789,6 +791,7 @@ class ApiClient:
                 client_id=self.options.client_id or "",
                 sub=verified.claims.get("sub"),
                 connection=connection,
+                login_hint=options.get("login_hint"),
             )
 
         if cache_key is not None:

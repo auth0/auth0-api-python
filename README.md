@@ -122,7 +122,7 @@ async def main():
 asyncio.run(main())
 ```
 
-When a `token_store` is configured on `ApiClientOptions`, the connection token is cached by caller and connection, skipping the exchange on repeat calls. Pass `verified=` to reuse an already-verified token rather than verifying a second time. See [Access Token for a Connection](EXAMPLES.md#access-token-for-a-connection-token-vault) for a full example and setup requirements.
+When a `token_store` is configured on `ApiClientOptions`, the connection token is cached by caller, connection and `login_hint`, skipping the exchange on repeat calls. Pass `verified=` with a `VerifiedToken` built from the `verify_access_token()` claims to reuse that verification rather than verifying a second time. See [Access Token for a Connection](EXAMPLES.md#access-token-for-a-connection-token-vault) for a full example and setup requirements.
 
 More info https://auth0.com/docs/secure/tokens/token-vault
 
