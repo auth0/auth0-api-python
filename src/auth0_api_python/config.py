@@ -2,7 +2,7 @@
 Configuration classes and utilities for auth0-api-python.
 """
 
-from typing import TYPE_CHECKING, Callable, Optional, Union
+from typing import TYPE_CHECKING, Callable, Literal, Optional, Union
 
 if TYPE_CHECKING:
     from .cache import CacheAdapter
@@ -32,6 +32,14 @@ class ApiClientOptions:
         client_secret: Required for get_access_token_for_connection, get_token_by_exchange_profile,
                        and get_token_on_behalf_of.
         timeout: HTTP timeout in seconds for token endpoint requests (default: 10.0).
+        organization_policy: Whether the incoming token must carry an org_id claim.
+                              "allow" (default) uses org_id when present but does not require it,
+                              matching the pre-existing behavior of verify_access_token.
+                              "required" rejects any token without an org_id claim.
+        organization_id: Optional allowlist of org_id claim values (a non-empty string or a non-empty
+                          list of non-empty strings). Only valid when organization_policy is
+                          "required" - passing it with "allow" raises ConfigurationError at
+                          construction time, as does an empty or non-string value.
     """
     def __init__(
             self,
@@ -49,6 +57,8 @@ class ApiClientOptions:
             client_id: Optional[str] = None,
             client_secret: Optional[str] = None,
             timeout: float = 10.0,
+            organization_policy: Literal["required", "allow"] = "allow",
+            organization_id: Optional[Union[str, list[str]]] = None,
     ):
         self.domain = domain
         self.domains = domains
@@ -64,3 +74,5 @@ class ApiClientOptions:
         self.client_id = client_id
         self.client_secret = client_secret
         self.timeout = timeout
+        self.organization_policy = organization_policy
+        self.organization_id = organization_id

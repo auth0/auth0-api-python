@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional, Union
@@ -18,7 +19,9 @@ from .errors import (
     InvalidAuthSchemeError,
     InvalidDpopProofError,
     MissingAuthorizationError,
+    MissingOrganizationError,
     MissingRequiredArgumentError,
+    OrganizationNotAllowedError,
     VerifyAccessTokenError,
 )
 from .types import OnBehalfOfTokenResult
@@ -103,6 +106,29 @@ class ApiClient:
 
         if not isinstance(options.cache_max_entries, int) or options.cache_max_entries < 2:
             raise ConfigurationError("cache_max_entries must be an integer greater than 1")
+
+        # Validate organization policy configuration
+        if options.organization_policy not in ("required", "allow"):
+            raise ConfigurationError(
+                "organization_policy must be either 'required' or 'allow'"
+            )
+        if options.organization_id is None:
+            self._allowed_org_ids = None
+        elif options.organization_policy != "required":
+            raise ConfigurationError(
+                "organization_id is only valid when organization_policy is 'required'"
+            )
+        else:
+            org_ids = options.organization_id
+            if isinstance(org_ids, str):
+                org_ids = [org_ids]
+            if not isinstance(org_ids, list) or not org_ids or not all(
+                isinstance(o, str) and o.strip() for o in org_ids
+            ):
+                raise ConfigurationError(
+                    "organization_id must be a non-empty string or a non-empty list of non-empty strings"
+                )
+            self._allowed_org_ids = frozenset(org_ids)
 
         if options.cache_adapter:
             self._discovery_cache = options.cache_adapter
@@ -406,6 +432,8 @@ class ApiClient:
         - Decodes and validates signature (RS256) with the correct key.
         - Checks standard claims: 'iss', 'aud', 'exp', 'iat'
         - Checks extra required claims if 'required_claims' is provided.
+        - Enforces organization_policy: requires 'org_id' when set to "required",
+          and checks it against organization_id when an allowlist is configured.
 
         Args:
             access_token: The JWT access token to verify
@@ -420,6 +448,8 @@ class ApiClient:
             MissingRequiredArgumentError: If no token is provided.
             VerifyAccessTokenError: If verification fails (signature, claims mismatch, etc.).
             DomainsResolverError: If domains resolver function fails.
+            MissingOrganizationError: If organization_policy is "required" and the token has no org_id claim.
+            OrganizationNotAllowedError: If the token's org_id is not in the organization_id allowlist.
         """
         if not access_token:
             raise MissingRequiredArgumentError("access_token")
@@ -559,6 +589,15 @@ class ApiClient:
         for rc in required_claims:
             if rc not in claims:
                 raise VerifyAccessTokenError(f"Missing required claim: {rc}")
+
+        # Organization policy enforcement
+        if self.options.organization_policy == "required":
+            org_id = claims.get("org_id")
+            if not isinstance(org_id, str) or not org_id:
+                raise MissingOrganizationError("Token missing required 'org_id' claim")
+            if self._allowed_org_ids is not None and org_id not in self._allowed_org_ids:
+                logging.warning("Rejected token with org_id %r not in the organization_id allowlist", org_id)
+                raise OrganizationNotAllowedError("Token org_id is not in the allowed list")
 
         return claims
 

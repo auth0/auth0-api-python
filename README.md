@@ -18,6 +18,7 @@ This SDK provides comprehensive support for securing APIs with Auth0-issued acce
 ### **Core Features**
 - **Unified Entry Point**: `verify_request()` - automatically detects and validates Bearer or DPoP schemes
 - **Multi-Custom Domain (MCD)** - Accept tokens from multiple Auth0 domains with static lists or dynamic resolvers
+- **Organization Policy** - Enforce and optionally allowlist the `org_id` claim on incoming tokens
 - **OIDC Discovery** - Automatic fetching of Auth0 metadata and JWKS with per-issuer caching
 - **JWT Validation** - Complete RS256 signature verification with claim validation
 - **DPoP Proof Verification** - Full RFC 9449 compliance with ES256 signature validation
@@ -412,6 +413,25 @@ For hybrid mode (migration scenarios), resolver patterns, error handling, and ca
 [Anonymous Sessions](https://auth0.com/docs/manage-users/sessions/anonymous-sessions) give a visitor an Auth0 identity before they log in. Session creation happens in your web application. This SDK only validates the tokens they produce. The access token is a standard Auth0 Bearer JWT, so `verify_access_token()` and `verify_request()` validate it exactly like any other token. The only difference is the `sub` claim, which starts with `anon@`.
 
 An anonymous token passes verification by default. Deciding whether an anonymous caller is authorized is your application's responsibility. See [Anonymous Callers](EXAMPLES.md#anonymous-callers) for allow, block-per-route, and block-globally patterns.
+
+### 9. Organization Policy
+
+For APIs that need to enforce an Auth0 Organization context on every request, optionally restricted to a specific set of Organizations:
+
+```python
+from auth0_api_python import ApiClient, ApiClientOptions
+
+api_client = ApiClient(ApiClientOptions(
+    domain="tenant.auth0.com",
+    audience="https://api.example.com",
+    organization_policy="required",
+    organization_id=["org_abc123", "org_def456"]
+))
+
+claims = await api_client.verify_access_token(access_token)
+```
+
+See the **[Organization Policy Guide](docs/OrganizationPolicy.md)** for policy modes, the allowlist, and error handling.
 
 ## Feedback
 
