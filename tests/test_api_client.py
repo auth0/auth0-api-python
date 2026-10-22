@@ -3900,6 +3900,36 @@ async def test_get_token_on_behalf_of_cache_hit_has_valid_expires_in(
 
 
 @pytest.mark.asyncio
+async def test_get_token_on_behalf_of_cache_hit_preserves_empty_granted_scope(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that a cache hit for a token granted no scopes still reports an empty scope."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token", scope=""),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+
+    first = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token,
+        audience="https://api.backend.com",
+        verified=verified,
+    )
+    second = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token,
+        audience="https://api.backend.com",
+        verified=verified,
+    )
+
+    assert first["scope"] == ""
+    assert second["access_token"] == "obo-access-token"
+    assert second["scope"] == ""
+
+
+@pytest.mark.asyncio
 async def test_get_token_on_behalf_of_expired_store_entry_triggers_fresh_exchange(
     mock_discovery, httpx_mock
 ):

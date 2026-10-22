@@ -171,7 +171,7 @@ class OboCache:
             "expires_at": cached["expires_at"],
         }
         granted = cached.get("granted_scopes")
-        if granted:
+        if granted is not None:
             result["scope"] = granted
         return result
 
