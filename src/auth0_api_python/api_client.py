@@ -7,6 +7,7 @@ from typing import Any, Optional, Union
 import httpx
 from authlib.jose import JsonWebKey, JsonWebToken
 
+from ._internal.obo_cache import OboCache
 from .cache import InMemoryCache
 from .config import ApiClientOptions
 from .errors import (
@@ -24,6 +25,10 @@ from .errors import (
     OrganizationNotAllowedError,
     VerifyAccessTokenError,
 )
+from .token_store import (
+    IndexedTokenStore,
+    VerifiedToken,
+)
 from .types import OnBehalfOfTokenResult
 from .utils import (
     calculate_jwk_thumbprint,
@@ -35,6 +40,8 @@ from .utils import (
     normalize_url_for_htu,
     sha256_base64url,
 )
+
+logger = logging.getLogger(__name__)
 
 # Token Exchange constants
 TOKEN_EXCHANGE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:token-exchange"  # noqa: S105
@@ -129,6 +136,18 @@ class ApiClient:
                     "organization_id must be a non-empty string or a non-empty list of non-empty strings"
                 )
             self._allowed_org_ids = frozenset(org_ids)
+        if options.scope_matching not in ("strict", "non_strict"):
+            raise ConfigurationError(
+                "scope_matching must be either 'strict' or 'non_strict'"
+            )
+        if (
+            options.scope_matching == "non_strict"
+            and not isinstance(options.token_store, IndexedTokenStore)
+        ):
+            raise ConfigurationError(
+                "scope_matching='non_strict' requires a token_store that subclasses IndexedTokenStore. "
+                "Use scope_matching='strict' or provide an IndexedTokenStore."
+            )
 
         if options.cache_adapter:
             self._discovery_cache = options.cache_adapter
@@ -136,6 +155,18 @@ class ApiClient:
         else:
             self._discovery_cache = InMemoryCache(max_entries=options.cache_max_entries)
             self._jwks_cache = InMemoryCache(max_entries=options.cache_max_entries)
+
+        self._token_store = options.token_store
+        self._obo_cache = (
+            OboCache(
+                options.token_store,
+                exchange_tenant=options.domain or "",
+                exchange_client_id=options.client_id or "",
+                scope_matching=options.scope_matching,
+            )
+            if options.token_store is not None
+            else None
+        )
 
         self._cache_ttl = options.cache_ttl_seconds
 
@@ -596,7 +627,7 @@ class ApiClient:
             if not isinstance(org_id, str) or not org_id:
                 raise MissingOrganizationError("Token missing required 'org_id' claim")
             if self._allowed_org_ids is not None and org_id not in self._allowed_org_ids:
-                logging.warning("Rejected token with org_id %r not in the organization_id allowlist", org_id)
+                logger.warning("Rejected token with org_id %r not in the organization_id allowlist", org_id)
                 raise OrganizationNotAllowedError("Token org_id is not in the allowed list")
 
         return claims
@@ -1008,6 +1039,8 @@ class ApiClient:
         access_token: str,
         audience: str,
         scope: Optional[str] = None,
+        *,
+        verified: Optional[VerifiedToken] = None,
     ) -> OnBehalfOfTokenResult:
         """
         Exchange an Auth0 access token for another Auth0 access token targeting a downstream API
@@ -1020,6 +1053,10 @@ class ApiClient:
             access_token: The Auth0 access token to exchange
             audience: Target API identifier for the exchanged access token
             scope: Optional space-separated OAuth 2.0 scopes to request
+            verified: The already-verified token, supplied by a caller that has verified it (for
+                      example an MCP server). When omitted and a token_store is configured, the
+                      token is verified here before any cache lookup. Its claims must carry sub
+                      and iss, otherwise caching is skipped with a warning.
 
         Returns:
             Dictionary containing:
@@ -1030,13 +1067,37 @@ class ApiClient:
             - token_type (str, optional): Token type (typically "Bearer")
             - issued_token_type (str, optional): RFC 8693 issued token type identifier
 
+        Caching is enabled only when a token_store is configured on the client. Without a store
+        every call performs a fresh exchange and nothing is cached. The scope_matching option
+        controls whether a cached token is reused only on an exact scope match ("strict") or
+        whenever its granted scopes cover the request ("non_strict").
+
         Raises:
             MissingRequiredArgumentError: If required parameters are missing
+            VerifyAccessTokenError: If a store is configured and either verified is omitted and the token fails verification, or verified is supplied but does not match the access token being exchanged
+            MissingOrganizationError: If a store is configured, verified is omitted, organization_policy is "required" and the token has no org_id claim
+            OrganizationNotAllowedError: If a store is configured, verified is omitted and the token's org_id is not in the organization_id allowlist
             GetTokenByExchangeProfileError: If client credentials are not configured or validation fails
             ApiError: If the token endpoint returns an error
         """
         if not audience:
             raise MissingRequiredArgumentError("audience")
+
+        identity = None
+        if self._obo_cache is not None:
+            if verified is None:
+                claims = await self.verify_access_token(access_token)
+                verified = VerifiedToken(access_token=access_token, claims=claims)
+            elif verified.access_token != access_token:
+                # The cache identity comes from the verified claims, so those claims must belong
+                # to the token being exchanged or a caller could read back another token's entry.
+                raise VerifyAccessTokenError("verified token does not match the access token being exchanged")
+            identity = self._obo_cache.identity(verified)
+
+        if identity is not None:
+            hit = await self._obo_cache.lookup(identity, audience, scope)
+            if hit is not None:
+                return hit
 
         result = await self.get_token_by_exchange_profile(
             subject_token=access_token,
@@ -1058,6 +1119,9 @@ class ApiClient:
             obo_result["token_type"] = result["token_type"]
         if "issued_token_type" in result:
             obo_result["issued_token_type"] = result["issued_token_type"]
+
+        if identity is not None:
+            await self._obo_cache.write(identity, audience, scope, obo_result)
 
         return obo_result
 

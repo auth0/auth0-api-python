@@ -60,6 +60,36 @@ asyncio.run(exchange_on_behalf_of())
 In the current implementation, `get_token_on_behalf_of()` forwards the incoming access token as
 the [RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693#section-2.1) `subject_token` and relies on Auth0 to handle any DPoP-specific behavior for that token.
 
+### Caching the Exchanged Token
+
+To cache the exchanged token, pass a `token_store` when constructing `ApiClient`. Caching activates automatically once a store is configured. The SDK builds the cache key from the verified `sub` and `iss` claims. Pass the token you already verified as `verified` so it is not verified a second time, otherwise `get_token_on_behalf_of()` verifies it before the cache lookup.
+
+```python
+from auth0_api_python import ApiClient, ApiClientOptions, VerifiedToken
+
+# token_store is your AbstractTokenStore implementation (e.g. Redis-backed).
+# See docs/TokenStorage.md for how to build one.
+api_client = ApiClient(ApiClientOptions(
+    domain="your-tenant.auth0.com",
+    audience="https://mcp-server.example.com",
+    client_id="<AUTH0_CLIENT_ID>",
+    client_secret="<AUTH0_CLIENT_SECRET>",
+    token_store=your_token_store,
+))
+
+claims = await api_client.verify_access_token(access_token=incoming_access_token)
+
+result = await api_client.get_token_on_behalf_of(
+    access_token=incoming_access_token,
+    audience="https://calendar-api.example.com",
+    scope="calendar:read calendar:write",
+    verified=VerifiedToken(access_token=incoming_access_token, claims=claims),
+)
+```
+
+See the **[Token Storage Guide](docs/TokenStorage.md)** for a full working example, how to
+implement a Redis-backed store, and the built-in encryption helpers.
+
 ## Inspecting Delegation After Token Verification
 
 When a downstream API or `MCP` server receives an access token that may have been issued through
