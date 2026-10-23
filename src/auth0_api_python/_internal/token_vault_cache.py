@@ -5,6 +5,7 @@ import time
 from typing import Any, Optional
 
 from ..token_store import AbstractTokenStore, TokenSet
+from .cache_expiry import is_fresh
 from .cache_keys import _normalized_scopes, token_vault_cache_key
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ class TokenVaultCache:
             logger.warning("Token store returned a malformed entry, treating as cache miss")
             return None
         now = int(time.time())
-        if expires_at <= now:
+        if not is_fresh(expires_at, now):
             return None
 
         return {

@@ -7,6 +7,7 @@ from typing import Any, Optional, Union
 import httpx
 from authlib.jose import JsonWebKey, JsonWebToken
 
+from ._internal.cache_expiry import is_fresh
 from ._internal.cache_keys import m2m_cache_key
 from ._internal.obo_cache import OboCache
 from ._internal.token_vault_cache import TokenVaultCache
@@ -621,6 +622,12 @@ class ApiClient:
         now = int(time.time())
         if "exp" not in claims or now >= claims["exp"]:
             raise VerifyAccessTokenError("Token is expired")
+        nbf = claims.get("nbf")
+        if nbf is not None:
+            if isinstance(nbf, bool) or not isinstance(nbf, (int, float)):
+                raise VerifyAccessTokenError("Invalid 'nbf' claim in token")
+            if now < nbf:
+                raise VerifyAccessTokenError("Token is not yet valid")
         if "iat" not in claims:
             raise VerifyAccessTokenError("Missing 'iat' claim in token")
 
@@ -1223,7 +1230,7 @@ class ApiClient:
             if cached is not None:
                 if "access_token" not in cached or "expires_at" not in cached:
                     logger.warning("Token store returned a malformed entry, treating as cache miss")
-                elif cached["expires_at"] > int(time.time()):
+                elif is_fresh(cached["expires_at"], int(time.time())):
                     hit: ClientCredentialsTokenResult = {
                         "access_token": cached["access_token"],
                         "expires_in": cached["expires_at"] - int(time.time()),

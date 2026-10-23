@@ -11,6 +11,8 @@ To enable caching, pass a `token_store` to `ApiClientOptions`. Once a store is c
 automatically builds a cache key from the incoming token and no additional argument is needed per
 call.
 
+A cached token is reused only while it has more than 30 seconds left before it expires. A token closer to expiry than that is treated as a miss and a fresh exchange runs, so a token returned from the cache does not lapse before the caller uses it.
+
 ## Cache Key Shapes
 
 The store uses a different cache key for each exchange method. OBO tokens from `get_token_on_behalf_of()` use the most detailed key, incorporating verified issuer, incoming client, exchange tenant and client, audience, organization, session, and granted scopes (see [On Behalf Of Exchange with Caching](#on-behalf-of-exchange-with-caching) for the full design). M2M tokens from `get_client_credentials_token()` are keyed on tenant, client, audience, and the requested scope set because the server is the identity and there is no user `sub`. Connection tokens from `get_access_token_for_connection()` are keyed on tenant, client, `sub` (the caller), and `connection` with no scope dimension, since the federated provider determines what scopes apply.
