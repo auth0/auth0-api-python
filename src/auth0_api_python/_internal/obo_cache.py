@@ -11,6 +11,7 @@ from ..token_store import (
     VerifiedToken,
 )
 from ..types import OnBehalfOfTokenResult
+from .cache_expiry import is_fresh
 from .cache_keys import (
     _normalized_scopes,
     index_cache_key,
@@ -161,7 +162,7 @@ class OboCache:
         if "access_token" not in cached or "expires_at" not in cached:
             logger.warning("Token store returned a malformed entry, treating as cache miss")
             return False
-        return cached["expires_at"] > now
+        return is_fresh(cached["expires_at"], now)
 
     @staticmethod
     def _hit(cached: TokenSet, now: int) -> OnBehalfOfTokenResult:
@@ -204,7 +205,7 @@ class OboCache:
             members = await indexed.list_index_members(self._index_key(identity, audience))
             candidates = [
                 m for m in members
-                if self._well_formed_member(m) and m["expires_at"] > now and is_covered_by(scope, m["granted_scopes"])
+                if self._well_formed_member(m) and is_fresh(m["expires_at"], now) and is_covered_by(scope, m["granted_scopes"])
             ]
         except Exception as exc:
             self._warn_read_failed(exc)

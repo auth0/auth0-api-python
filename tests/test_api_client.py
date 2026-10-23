@@ -458,6 +458,71 @@ async def test_verify_access_token_fail_no_exp(httpx_mock: HTTPXMock):
     assert "exp" in error_str or "missing" in error_str
 
 
+async def _verify_with_nbf(httpx_mock: HTTPXMock, nbf):
+    httpx_mock.add_response(method="GET", url=DISCOVERY_URL, json={"issuer": "https://auth0.local/", "jwks_uri": JWKS_URL})
+    httpx_mock.add_response(method="GET", url=JWKS_URL, json={"keys": [PUBLIC_RSA_JWK]})
+    claims = {} if nbf is None else {"nbf": nbf}
+    access_token = await generate_token(
+        domain="auth0.local", user_id="user_123", audience="my-audience", claims=claims
+    )
+    api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
+    return await api_client.verify_access_token(access_token=access_token)
+
+
+@pytest.mark.asyncio
+async def test_verify_access_token_fail_nbf_in_future(httpx_mock: HTTPXMock):
+    """A token whose 'nbf' is still in the future is rejected."""
+    with pytest.raises(VerifyAccessTokenError) as err:
+        await _verify_with_nbf(httpx_mock, int(time.time()) + 3600)
+
+    assert "not yet valid" in str(err.value)
+
+
+@pytest.mark.asyncio
+async def test_verify_access_token_succeeds_with_past_nbf(httpx_mock: HTTPXMock):
+    """A token whose 'nbf' has passed is accepted."""
+    claims = await _verify_with_nbf(httpx_mock, int(time.time()) - 60)
+
+    assert claims["sub"] == "user_123"
+
+
+@pytest.mark.asyncio
+async def test_verify_access_token_succeeds_without_nbf(httpx_mock: HTTPXMock):
+    """'nbf' is optional, so a token without it is accepted."""
+    claims = await _verify_with_nbf(httpx_mock, None)
+
+    assert "nbf" not in claims
+
+
+@pytest.mark.asyncio
+@freeze_time("2025-01-01T00:00:00Z")
+async def test_verify_access_token_succeeds_when_nbf_equals_now(httpx_mock: HTTPXMock):
+    """A token whose 'nbf' is exactly the current time is accepted."""
+    claims = await _verify_with_nbf(httpx_mock, int(time.time()))
+
+    assert claims["sub"] == "user_123"
+
+
+@pytest.mark.asyncio
+@freeze_time("2025-01-01T00:00:00Z")
+async def test_verify_access_token_fail_fractional_nbf_in_future(httpx_mock: HTTPXMock):
+    """A fractional 'nbf' half a second ahead is a valid number and is rejected as not yet valid."""
+    with pytest.raises(VerifyAccessTokenError) as err:
+        await _verify_with_nbf(httpx_mock, time.time() + 0.5)
+
+    assert "not yet valid" in str(err.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_nbf", ["soon", True, [1]])
+async def test_verify_access_token_fail_non_numeric_nbf(httpx_mock: HTTPXMock, bad_nbf):
+    """A non-numeric 'nbf' is rejected as an invalid token."""
+    with pytest.raises(VerifyAccessTokenError) as err:
+        await _verify_with_nbf(httpx_mock, bad_nbf)
+
+    assert "nbf" in str(err.value)
+
+
 @pytest.mark.asyncio
 async def test_verify_access_token_fail_no_audience_config():
     """
@@ -4373,6 +4438,36 @@ async def test_get_token_on_behalf_of_expired_store_entry_triggers_fresh_exchang
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("seconds_left", "expect_exchange"),
+    [(10, True), (3600, False)],
+    ids=["within-buffer-is-refreshed", "beyond-buffer-is-reused"],
+)
+async def test_get_token_on_behalf_of_cache_entry_expiry_buffer(
+    api_client_confidential, httpx_mock, seconds_left, expect_exchange
+):
+    """A cached entry about to expire is not reused, one with time to spare is."""
+    audience = "https://api.backend.com"
+    access_token = make_access_token("auth0|user1")
+    await api_client_confidential._token_store.set(
+        strict_key(access_token, audience=audience, scopes=None),
+        {"access_token": "cached-token", "expires_at": int(time.time()) + seconds_left},
+    )
+    if expect_exchange:
+        httpx_mock.add_response(method="GET", url=DISCOVERY_URL, json={"token_endpoint": TOKEN_ENDPOINT})
+        httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="fresh-token"))
+
+    result = await api_client_confidential.get_token_on_behalf_of(
+        access_token=access_token,
+        audience=audience,
+        verified=verified_for(access_token, "auth0|user1"),
+    )
+
+    assert result["access_token"] == ("fresh-token" if expect_exchange else "cached-token")
+    assert len([r for r in httpx_mock.get_requests() if r.method == "POST"]) == int(expect_exchange)
+
+
+@pytest.mark.asyncio
 async def test_get_token_on_behalf_of_corrupt_store_value_treated_as_cache_miss(
     mock_discovery, httpx_mock
 ):
@@ -4646,6 +4741,32 @@ async def test_get_client_credentials_token_cache_miss_after_expiry(
     assert result["access_token"] == "fresh-m2m-token"
     token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
     assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("seconds_left", "expect_exchange"),
+    [(10, True), (3600, False)],
+    ids=["within-buffer-is-refreshed", "beyond-buffer-is-reused"],
+)
+async def test_get_client_credentials_token_cache_entry_expiry_buffer(
+    api_client_confidential, httpx_mock, seconds_left, expect_exchange
+):
+    """A cached M2M entry about to expire is not reused, one with time to spare is."""
+    audience = "https://billing-api.example.com"
+    cache_key = m2m_cache_key(tenant="auth0.local", client_id="cid", audience=audience, scopes=None)
+    await api_client_confidential._token_store.set(
+        cache_key,
+        {"access_token": "cached-m2m-token", "expires_at": int(time.time()) + seconds_left},
+    )
+    if expect_exchange:
+        httpx_mock.add_response(method="GET", url=DISCOVERY_URL, json={"token_endpoint": TOKEN_ENDPOINT})
+        httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="fresh-m2m-token"))
+
+    result = await api_client_confidential.get_client_credentials_token(audience=audience)
+
+    assert result["access_token"] == ("fresh-m2m-token" if expect_exchange else "cached-m2m-token")
+    assert len([r for r in httpx_mock.get_requests() if r.method == "POST"]) == int(expect_exchange)
 
 
 @pytest.mark.asyncio
@@ -5081,6 +5202,39 @@ async def test_nss_index_expired_member_not_reused(mock_discovery, httpx_mock):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("seconds_left", "expect_exchange"),
+    [(10, True), (3600, False)],
+    ids=["within-buffer-is-refreshed", "beyond-buffer-is-reused"],
+)
+async def test_nss_index_member_expiry_buffer(httpx_mock, seconds_left, expect_exchange):
+    """Index: a member about to expire is not reused, one with time to spare is."""
+    client = _nss_client()
+    token = make_access_token("auth0|user1")
+    audience = "https://api.example.com"
+    expires_at = int(time.time()) + seconds_left
+
+    token_key = index_token_key(token, audience=audience, scopes="read:x")
+    await client._token_store.add_index_member(index_key(token, audience=audience), {
+        "token_key": token_key,
+        "granted_scopes": "read:x",
+        "expires_at": expires_at,
+    })
+    await client._token_store.set(
+        token_key,
+        {"access_token": "cached-token", "expires_at": expires_at, "granted_scopes": "read:x"},
+    )
+    if expect_exchange:
+        httpx_mock.add_response(method="GET", url=DISCOVERY_URL, json={"token_endpoint": TOKEN_ENDPOINT})
+        httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="fresh-token", scope="read:x"))
+
+    result = await client.get_token_on_behalf_of(access_token=token, audience=audience, scope="read:x", verified=verified_for(token, "auth0|user1"))
+
+    assert result["access_token"] == ("fresh-token" if expect_exchange else "cached-token")
+    assert len([r for r in httpx_mock.get_requests() if r.method == "POST"]) == int(expect_exchange)
+
+
+@pytest.mark.asyncio
 async def test_nss_index_list_failure_falls_back_to_exchange(mock_discovery, httpx_mock):
     """Index: a failing index read is treated as a miss and a fresh exchange runs."""
     client = _nss_client(token_store=RaisingListIndexTokenStore())
@@ -5409,6 +5563,34 @@ async def test_get_access_token_for_connection_cache_miss_after_expiry(
     assert result["access_token"] == "fresh-tv-token"
     token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
     assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("seconds_left", "expect_exchange"),
+    [(10, True), (3600, False)],
+    ids=["within-buffer-is-refreshed", "beyond-buffer-is-reused"],
+)
+async def test_get_access_token_for_connection_cache_entry_expiry_buffer(
+    api_client_confidential, httpx_mock, seconds_left, expect_exchange
+):
+    """A cached entry about to expire is not reused, one with time to spare is."""
+    await api_client_confidential._token_store.set(
+        tv_key("auth0|user1", "google-oauth2"),
+        {"access_token": "cached-tv-token", "expires_at": int(time.time()) + seconds_left},
+    )
+    if expect_exchange:
+        httpx_mock.add_response(method="GET", url=DISCOVERY_URL, json={"token_endpoint": TOKEN_ENDPOINT})
+        httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="fresh-tv-token"))
+
+    token = make_access_token("auth0|user1")
+    result = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token},
+        verified=VerifiedToken(access_token=token, claims={"sub": "auth0|user1", "iss": CONFIDENTIAL_ISS}),
+    )
+
+    assert result["access_token"] == ("fresh-tv-token" if expect_exchange else "cached-tv-token")
+    assert len([r for r in httpx_mock.get_requests() if r.method == "POST"]) == int(expect_exchange)
 
 
 @pytest.mark.asyncio
