@@ -306,6 +306,23 @@ headers = {"authorization": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."}
 result = asyncio.run(validate_request(headers))
 ```
 
+### Telling an Outage from an Invalid Token
+
+`AuthServerUnavailableError` is raised when the discovery document or JWKS cannot be fetched. It subclasses `VerifyAccessTokenError`, so catch it first to answer `503` instead of `401`.
+
+```python
+from auth0_api_python import ApiClient, AuthServerUnavailableError, VerifyAccessTokenError
+
+async def validate_token(api_client: ApiClient, token: str):
+    try:
+        claims = await api_client.verify_access_token(token)
+        return {"success": True, "user": claims["sub"]}
+    except AuthServerUnavailableError as e:
+        return {"error": e.get_error_code()}, e.get_status_code()  # 503, retry later
+    except VerifyAccessTokenError as e:
+        return {"error": e.get_error_code()}, e.get_status_code()  # 401, token rejected
+```
+
 
 ## DPoP Authentication 
 

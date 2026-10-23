@@ -249,6 +249,8 @@ except VerifyAccessTokenError as e:
     e.get_headers()     # {"WWW-Authenticate": "Bearer error=\"invalid_token\", ..."}
 ```
 
+If the discovery document or JWKS of an allowed domain cannot be fetched, `verify_access_token()` raises `AuthServerUnavailableError` (a `VerifyAccessTokenError` subclass, status `503`, code `auth_server_unavailable`) instead of a 401.
+
 ---
 
 ## Migration Guide
