@@ -11,7 +11,7 @@ To enable caching, pass a `token_store` to `ApiClientOptions`. Once a store is c
 automatically builds a cache key from the incoming token and no additional argument is needed per
 call.
 
-A cached token is reused only while it has more than 30 seconds left before it expires. A token closer to expiry than that is treated as a miss and a fresh exchange runs, so a token returned from the cache does not lapse before the caller uses it.
+A cached token is reused only while it has more than 30 seconds left before it expires. A token closer to expiry than that is treated as a miss and a fresh exchange runs, so a token returned from the cache is unlikely to lapse before the caller uses it. A token issued with an `expires_in` of 30 seconds or less is therefore never served from the cache.
 
 ## Cache Key Shapes
 

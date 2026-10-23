@@ -470,7 +470,7 @@ class ApiClient:
 
         - Fetches OIDC metadata and JWKS if not already cached.
         - Decodes and validates signature (RS256) with the correct key.
-        - Checks standard claims: 'iss', 'aud', 'exp', 'iat'
+        - Checks standard claims: 'iss', 'aud', 'exp', 'nbf', 'iat'
         - Checks extra required claims if 'required_claims' is provided.
         - Enforces organization_policy: requires 'org_id' when set to "required",
           and checks it against organization_id when an allowlist is configured.

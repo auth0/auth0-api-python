@@ -494,6 +494,25 @@ async def test_verify_access_token_succeeds_without_nbf(httpx_mock: HTTPXMock):
 
 
 @pytest.mark.asyncio
+@freeze_time("2025-01-01T00:00:00Z")
+async def test_verify_access_token_succeeds_when_nbf_equals_now(httpx_mock: HTTPXMock):
+    """A token whose 'nbf' is exactly the current time is accepted."""
+    claims = await _verify_with_nbf(httpx_mock, int(time.time()))
+
+    assert claims["sub"] == "user_123"
+
+
+@pytest.mark.asyncio
+@freeze_time("2025-01-01T00:00:00Z")
+async def test_verify_access_token_fail_fractional_nbf_in_future(httpx_mock: HTTPXMock):
+    """A fractional 'nbf' half a second ahead is a valid number and is rejected as not yet valid."""
+    with pytest.raises(VerifyAccessTokenError) as err:
+        await _verify_with_nbf(httpx_mock, time.time() + 0.5)
+
+    assert "not yet valid" in str(err.value)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("bad_nbf", ["soon", True, [1]])
 async def test_verify_access_token_fail_non_numeric_nbf(httpx_mock: HTTPXMock, bad_nbf):
     """A non-numeric 'nbf' is rejected as an invalid token."""

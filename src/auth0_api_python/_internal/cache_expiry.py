@@ -1,6 +1,6 @@
 """Freshness rule shared by every cache of a token the SDK minted."""
 
-# A token this close to expiry is treated as expired, so it cannot lapse before the caller uses it.
+# A token this close to expiry is treated as expired, so it is unlikely to lapse before the caller uses it.
 EXPIRY_BUFFER_SECONDS = 30
 
 
