@@ -11,6 +11,7 @@ from .cache import CacheAdapter, InMemoryCache
 from .config import ApiClientOptions
 from .errors import (
     ApiError,
+    AuthServerUnavailableError,
     ConfigurationError,
     DomainsResolverError,
     GetAccessTokenForConnectionError,
@@ -38,6 +39,7 @@ __all__ = [
     "ApiClient",
     "ApiClientOptions",
     "ApiError",
+    "AuthServerUnavailableError",
     "CacheAdapter",
     "ClientCredentialsTokenResult",
     "ConfigurationError",

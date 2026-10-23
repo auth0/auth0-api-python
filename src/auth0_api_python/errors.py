@@ -56,6 +56,16 @@ class VerifyAccessTokenError(BaseAuthError):
         return "invalid_token"
 
 
+class AuthServerUnavailableError(VerifyAccessTokenError):
+    """Error raised when the OIDC discovery document or JWKS cannot be reached."""
+
+    def get_status_code(self) -> int:
+        return 503
+
+    def get_error_code(self) -> str:
+        return "auth_server_unavailable"
+
+
 class MissingOrganizationError(VerifyAccessTokenError):
     """Error raised when organization_policy is 'required' but the token has no org_id claim."""
 
