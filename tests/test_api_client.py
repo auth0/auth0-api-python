@@ -490,48 +490,58 @@ async def test_verify_access_token_fail_malformed_token():
     assert "failed to parse token" in str(e.value).lower()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["connect_error", "http_500"])
-async def test_verify_access_token_discovery_fetch_failure_is_unavailable(httpx_mock: HTTPXMock, failure):
-    """A failing discovery fetch raises the 503 error, not a 401 invalid token."""
+FETCH_FAILURES = [
+    ("connect_error", True),
+    ("http_500", True),
+    ("http_429", True),
+    ("http_404", False),
+]
+
+
+def _add_fetch_failure(httpx_mock: HTTPXMock, url: str, failure: str):
     if failure == "connect_error":
-        httpx_mock.add_exception(httpx.ConnectError("boom"), method="GET", url=DISCOVERY_URL)
+        httpx_mock.add_exception(httpx.ConnectError("boom"), method="GET", url=url)
     else:
-        httpx_mock.add_response(method="GET", url=DISCOVERY_URL, status_code=500)
+        httpx_mock.add_response(method="GET", url=url, status_code=int(failure.split("_")[1]))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure,unavailable", FETCH_FAILURES)
+async def test_verify_access_token_discovery_fetch_failure_status(httpx_mock: HTTPXMock, failure, unavailable):
+    """Outage-type discovery failures raise the 503 error, other failures stay a 401 invalid token."""
+    _add_fetch_failure(httpx_mock, DISCOVERY_URL, failure)
 
     access_token = await generate_token(domain="auth0.local", user_id="user_123", audience="my-audience")
     api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
 
-    with pytest.raises(AuthServerUnavailableError) as err:
+    with pytest.raises(VerifyAccessTokenError) as err:
         await api_client.verify_access_token(access_token)
 
-    assert isinstance(err.value, VerifyAccessTokenError)
-    assert err.value.get_status_code() == 503
-    assert err.value.get_error_code() == "auth_server_unavailable"
+    assert isinstance(err.value, AuthServerUnavailableError) is unavailable
+    assert err.value.get_status_code() == (503 if unavailable else 401)
+    assert err.value.get_error_code() == ("auth_server_unavailable" if unavailable else "invalid_token")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["connect_error", "http_500"])
-async def test_verify_access_token_jwks_fetch_failure_is_unavailable(httpx_mock: HTTPXMock, failure):
-    """A failing JWKS fetch raises the 503 error, not a 401 invalid token."""
+@pytest.mark.parametrize("failure,unavailable", FETCH_FAILURES)
+async def test_verify_access_token_jwks_fetch_failure_status(httpx_mock: HTTPXMock, failure, unavailable):
+    """Outage-type JWKS failures raise the 503 error, other failures stay a 401 invalid token."""
     httpx_mock.add_response(
         method="GET",
         url=DISCOVERY_URL,
         json={"issuer": "https://auth0.local/", "jwks_uri": JWKS_URL},
     )
-    if failure == "connect_error":
-        httpx_mock.add_exception(httpx.ConnectError("boom"), method="GET", url=JWKS_URL)
-    else:
-        httpx_mock.add_response(method="GET", url=JWKS_URL, status_code=500)
+    _add_fetch_failure(httpx_mock, JWKS_URL, failure)
 
     access_token = await generate_token(domain="auth0.local", user_id="user_123", audience="my-audience")
     api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
 
-    with pytest.raises(AuthServerUnavailableError) as err:
+    with pytest.raises(VerifyAccessTokenError) as err:
         await api_client.verify_access_token(access_token)
 
-    assert err.value.get_status_code() == 503
-    assert err.value.get_error_code() == "auth_server_unavailable"
+    assert isinstance(err.value, AuthServerUnavailableError) is unavailable
+    assert err.value.get_status_code() == (503 if unavailable else 401)
+    assert err.value.get_error_code() == ("auth_server_unavailable" if unavailable else "invalid_token")
 
 
 @pytest.mark.asyncio
@@ -547,6 +557,22 @@ async def test_verify_access_token_custom_fetch_failure_is_unavailable():
         await api_client.verify_access_token(access_token)
 
     assert err.value.get_status_code() == 503
+
+
+@pytest.mark.asyncio
+async def test_verify_access_token_custom_fetch_non_network_error_stays_invalid_token():
+    """A custom_fetch that raises something other than a connection error or timeout is a 401, not an outage."""
+    async def broken_fetch(url, **kwargs):
+        raise ValueError("boom")
+
+    access_token = await generate_token(domain="auth0.local", user_id="user_123", audience="my-audience")
+    api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience", custom_fetch=broken_fetch))
+
+    with pytest.raises(VerifyAccessTokenError) as err:
+        await api_client.verify_access_token(access_token)
+
+    assert not isinstance(err.value, AuthServerUnavailableError)
+    assert err.value.get_status_code() == 401
 
 
 @pytest.mark.asyncio

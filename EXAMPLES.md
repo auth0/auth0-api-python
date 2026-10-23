@@ -308,7 +308,7 @@ result = asyncio.run(validate_request(headers))
 
 ### Telling an Outage from an Invalid Token
 
-`AuthServerUnavailableError` is raised when the discovery document or JWKS cannot be fetched. It subclasses `VerifyAccessTokenError`, so catch it first to answer `503` instead of `401`.
+`AuthServerUnavailableError` is raised when the discovery document or JWKS cannot be reached. It subclasses `VerifyAccessTokenError`, so catch it first to answer `503` instead of `401`.
 
 ```python
 from auth0_api_python import ApiClient, AuthServerUnavailableError, VerifyAccessTokenError

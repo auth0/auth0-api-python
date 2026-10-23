@@ -57,7 +57,7 @@ class VerifyAccessTokenError(BaseAuthError):
 
 
 class AuthServerUnavailableError(VerifyAccessTokenError):
-    """Error raised when the OIDC discovery document or JWKS cannot be fetched."""
+    """Error raised when the OIDC discovery document or JWKS cannot be reached."""
 
     def get_status_code(self) -> int:
         return 503

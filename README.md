@@ -96,7 +96,11 @@ asyncio.run(main())
 
 In this example, the returned dictionary contains the decoded claims (like `sub`, `scope`, etc.) from the verified token.
 
-If the OIDC discovery document or the JWKS request fails (connection error, timeout or an HTTP error response), the method raises `AuthServerUnavailableError`, a subclass of `VerifyAccessTokenError` with status `503` and error code `auth_server_unavailable`. `verify_request()` raises the same error and sets no `WWW-Authenticate` header, so clients retry later instead of requesting a new token.
+If the OIDC discovery document or the JWKS request cannot be reached (connection error, timeout, or an HTTP `5xx` or `429` response), the method raises `AuthServerUnavailableError`, a subclass of `VerifyAccessTokenError` with status `503` and error code `auth_server_unavailable`. Other fetch failures, such as a `404` or a malformed response, still raise `VerifyAccessTokenError`. `verify_request()` raises the same error and sets no `WWW-Authenticate` header, so clients retry later instead of requesting a new token.
+
+HTTP status codes are checked only for the default HTTP client. With `custom_fetch`, only a connection error or timeout raised by your function is reported as `AuthServerUnavailableError`.
+
+This error comes from token verification only. Where verification is skipped, such as `get_client_credentials_token()` or an exchange with `verified=`, a failed discovery request raises the underlying `httpx` error.
 
 ### 4. Get an access token for a connection
 

@@ -40,6 +40,7 @@ from .utils import (
     fetch_oidc_metadata,
     get_unverified_header,
     get_unverified_payload,
+    is_auth_server_outage,
     normalize_domain,
     normalize_url_for_htu,
     sha256_base64url,
@@ -307,7 +308,7 @@ class ApiClient:
             InvalidAuthSchemeError: If an unsupported scheme is provided
             InvalidDpopProofError: If DPoP verification fails
             VerifyAccessTokenError: If access token verification fails
-            AuthServerUnavailableError: If the OIDC discovery document or JWKS cannot be fetched
+            AuthServerUnavailableError: If the OIDC discovery document or JWKS cannot be reached
         """
         # Normalize header keys to lowercase for robust access
         headers = {k.lower(): v for k, v in headers.items()}
@@ -491,7 +492,7 @@ class ApiClient:
             DomainsResolverError: If domains resolver function fails.
             MissingOrganizationError: If organization_policy is "required" and the token has no org_id claim.
             OrganizationNotAllowedError: If the token's org_id is not in the organization_id allowlist.
-            AuthServerUnavailableError: If the OIDC discovery document or JWKS cannot be fetched.
+            AuthServerUnavailableError: If the OIDC discovery document or JWKS cannot be reached.
         """
         if not access_token:
             raise MissingRequiredArgumentError("access_token")
@@ -545,7 +546,8 @@ class ApiClient:
         except VerifyAccessTokenError:
             raise
         except Exception as e:
-            raise AuthServerUnavailableError(
+            error_class = AuthServerUnavailableError if is_auth_server_outage(e) else VerifyAccessTokenError
+            raise error_class(
                 f"Failed to fetch OIDC discovery metadata: {str(e)}"
             ) from e
 
@@ -576,7 +578,8 @@ class ApiClient:
         except VerifyAccessTokenError:
             raise
         except Exception as e:
-            raise AuthServerUnavailableError(
+            error_class = AuthServerUnavailableError if is_auth_server_outage(e) else VerifyAccessTokenError
+            raise error_class(
                 f"Failed to fetch JWKS: {str(e)}"
             ) from e
 
@@ -757,7 +760,7 @@ class ApiClient:
             VerifyAccessTokenError: If a store is configured and either verified is omitted and the token fails verification, or verified is supplied but does not match the access token being exchanged.
             MissingOrganizationError: If a store is configured, verified is omitted, organization_policy is "required" and the token has no org_id claim.
             OrganizationNotAllowedError: If a store is configured, verified is omitted and the token's org_id is not in the organization_id allowlist.
-            AuthServerUnavailableError: If a store is configured, verified is omitted and the OIDC discovery document or JWKS cannot be fetched.
+            AuthServerUnavailableError: If a store is configured, verified is omitted and the OIDC discovery document or JWKS cannot be reached.
 
         Returns:
             Dictionary containing the token response with access_token, expires_in, and scope.
@@ -1129,7 +1132,7 @@ class ApiClient:
             VerifyAccessTokenError: If a store is configured and either verified is omitted and the token fails verification, or verified is supplied but does not match the access token being exchanged
             MissingOrganizationError: If a store is configured, verified is omitted, organization_policy is "required" and the token has no org_id claim
             OrganizationNotAllowedError: If a store is configured, verified is omitted and the token's org_id is not in the organization_id allowlist
-            AuthServerUnavailableError: If a store is configured, verified is omitted and the OIDC discovery document or JWKS cannot be fetched
+            AuthServerUnavailableError: If a store is configured, verified is omitted and the OIDC discovery document or JWKS cannot be reached
             GetTokenByExchangeProfileError: If client credentials are not configured or validation fails
             ApiError: If the token endpoint returns an error
         """
