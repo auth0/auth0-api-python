@@ -28,3 +28,6 @@ coverage.xml
 
 # AI Tools
 .claude/
+
+# Sphinx
+sphinx/_build/
