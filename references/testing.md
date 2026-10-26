@@ -25,7 +25,9 @@ poetry run pytest tests/test_api_client.py -k dpop  # filter by name
 ## Mocking and test utilities
 
 - `tests/conftest.py` provides:
-  - `api_client_confidential`: an `ApiClient` with `domain="auth0.local"` and placeholder `client_id` / `client_secret`
+  - `api_client_confidential`: an `ApiClient` with `domain="auth0.local"`, placeholder `client_id` / `client_secret`, and an `InMemoryTokenStore`, so OBO and Token Vault calls verify the token and cache
+  - `api_client_confidential_no_store`: the same client without a `token_store`, for exchanges that must not verify or cache
+  - `InMemoryTokenStore`, `InMemoryIndexedTokenStore`: test-only stores (never for production), the latter for `scope_matching="non_strict"`
   - `mock_discovery`: registers the discovery response
   - `mock_token_response(...)`, `token_success(...)`, `last_form(...)`, `last_auth_header(...)`: token endpoint mocking and request inspection
   - `assert_api_error(...)`, `assert_http_basic_auth(...)`, `assert_form_post(...)`, `assert_no_requests(...)`: shared assertions. Use `assert_api_error` rather than hand-rolling `.code` / status checks

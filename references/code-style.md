@@ -51,13 +51,14 @@ def get_token(self, options):                                   # sync, untyped
 
 Each line is a separate violation: sync in an async SDK, no timeout, unfiltered OAuth parameters, a print of a possibly token-bearing body, a `None` a caller can mistake for success, and an unvalidated response in the public API.
 
-Public errors meant for integrators are exported from `__init__.py` (`ApiError`, `ConfigurationError`, `DomainsResolverError`, `GetTokenByExchangeProfileError`). Others are imported from `auth0_api_python.errors`.
+Public errors meant for integrators are exported from `__init__.py` (`ApiError`, `AuthServerUnavailableError`, `ConfigurationError`, `DomainsResolverError`, `GetAccessTokenForConnectionError`, `GetClientCredentialsTokenError`, `GetTokenByExchangeProfileError`, `MissingOrganizationError`, `OrganizationNotAllowedError`, `VerifyAccessTokenError`). Others are imported from `auth0_api_python.errors`.
 
 ## Patterns
 
 - **Options object:** all configuration goes through `ApiClientOptions` and is validated in `ApiClient.__init__`, raising `ConfigurationError` or `MissingRequiredArgumentError` at construction rather than at first use.
 - **Async I/O:** network calls use `httpx.AsyncClient`, or the integrator's `custom_fetch` when provided. Public verification and token methods are `async def`.
 - **Pluggable cache:** `CacheAdapter` ABC with `get` / `set` / `delete` / `clear`. `InMemoryCache` is the default. Entry TTL is `min(Cache-Control max-age, cache_ttl_seconds)` when the discovery/JWKS response sends `max-age`.
+- **Token store:** `AbstractTokenStore` ABC with `get` / `set` / `delete` plus `encrypt` / `decrypt`, separate from `CacheAdapter`. The helpers are opt-in: the SDK never calls them, so a store encrypts in its own `get` / `set`. `IndexedTokenStore` adds `add_index_member` / `list_index_members` for `scope_matching="non_strict"`. Cache classes and key builders live in `_internal/` and are not public. A store failure is logged and treated as a miss, never raised to the caller.
 - **Docstrings:** Google style with `Args:` / `Returns:` / `Raises:` sections on public methods.
 - **Placement:** `api_client.py` has one banner, `# ===== Private Methods =====`. New public methods go above it after the existing ones, new helpers below it. In files without banners, put new code next to related code or at the end, never at an arbitrary position.
 
