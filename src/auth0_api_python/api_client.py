@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional, Union
@@ -6,32 +7,47 @@ from typing import Any, Optional, Union
 import httpx
 from authlib.jose import JsonWebKey, JsonWebToken
 
+from ._internal.cache_expiry import is_fresh
+from ._internal.cache_keys import m2m_cache_key
+from ._internal.obo_cache import OboCache
+from ._internal.token_vault_cache import TokenVaultCache
 from .cache import InMemoryCache
 from .config import ApiClientOptions
 from .errors import (
     ApiError,
+    AuthServerUnavailableError,
     BaseAuthError,
     ConfigurationError,
     DomainsResolverError,
     GetAccessTokenForConnectionError,
+    GetClientCredentialsTokenError,
     GetTokenByExchangeProfileError,
     InvalidAuthSchemeError,
     InvalidDpopProofError,
     MissingAuthorizationError,
+    MissingOrganizationError,
     MissingRequiredArgumentError,
+    OrganizationNotAllowedError,
     VerifyAccessTokenError,
 )
-from .types import OnBehalfOfTokenResult
+from .token_store import (
+    IndexedTokenStore,
+    VerifiedToken,
+)
+from .types import ClientCredentialsTokenResult, OnBehalfOfTokenResult
 from .utils import (
     calculate_jwk_thumbprint,
     fetch_jwks,
     fetch_oidc_metadata,
     get_unverified_header,
     get_unverified_payload,
+    is_auth_server_outage,
     normalize_domain,
     normalize_url_for_htu,
     sha256_base64url,
 )
+
+logger = logging.getLogger(__name__)
 
 # Token Exchange constants
 TOKEN_EXCHANGE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:token-exchange"  # noqa: S105
@@ -104,12 +120,64 @@ class ApiClient:
         if not isinstance(options.cache_max_entries, int) or options.cache_max_entries < 2:
             raise ConfigurationError("cache_max_entries must be an integer greater than 1")
 
+        # Validate organization policy configuration
+        if options.organization_policy not in ("required", "allow"):
+            raise ConfigurationError(
+                "organization_policy must be either 'required' or 'allow'"
+            )
+        if options.organization_id is None:
+            self._allowed_org_ids = None
+        elif options.organization_policy != "required":
+            raise ConfigurationError(
+                "organization_id is only valid when organization_policy is 'required'"
+            )
+        else:
+            org_ids = options.organization_id
+            if isinstance(org_ids, str):
+                org_ids = [org_ids]
+            if not isinstance(org_ids, list) or not org_ids or not all(
+                isinstance(o, str) and o.strip() for o in org_ids
+            ):
+                raise ConfigurationError(
+                    "organization_id must be a non-empty string or a non-empty list of non-empty strings"
+                )
+            self._allowed_org_ids = frozenset(org_ids)
+        if options.scope_matching not in ("strict", "non_strict"):
+            raise ConfigurationError(
+                "scope_matching must be either 'strict' or 'non_strict'"
+            )
+        if (
+            options.scope_matching == "non_strict"
+            and not isinstance(options.token_store, IndexedTokenStore)
+        ):
+            raise ConfigurationError(
+                "scope_matching='non_strict' requires a token_store that subclasses IndexedTokenStore. "
+                "Use scope_matching='strict' or provide an IndexedTokenStore."
+            )
+
         if options.cache_adapter:
             self._discovery_cache = options.cache_adapter
             self._jwks_cache = options.cache_adapter
         else:
             self._discovery_cache = InMemoryCache(max_entries=options.cache_max_entries)
             self._jwks_cache = InMemoryCache(max_entries=options.cache_max_entries)
+
+        self._token_store = options.token_store
+        self._obo_cache = (
+            OboCache(
+                options.token_store,
+                exchange_tenant=options.domain or "",
+                exchange_client_id=options.client_id or "",
+                scope_matching=options.scope_matching,
+            )
+            if options.token_store is not None
+            else None
+        )
+        self._token_vault_cache = (
+            TokenVaultCache(options.token_store)
+            if options.token_store is not None
+            else None
+        )
 
         self._cache_ttl = options.cache_ttl_seconds
 
@@ -241,6 +309,7 @@ class ApiClient:
             InvalidAuthSchemeError: If an unsupported scheme is provided
             InvalidDpopProofError: If DPoP verification fails
             VerifyAccessTokenError: If access token verification fails
+            AuthServerUnavailableError: If the OIDC discovery document or JWKS cannot be reached
         """
         # Normalize header keys to lowercase for robust access
         headers = {k.lower(): v for k, v in headers.items()}
@@ -404,8 +473,10 @@ class ApiClient:
 
         - Fetches OIDC metadata and JWKS if not already cached.
         - Decodes and validates signature (RS256) with the correct key.
-        - Checks standard claims: 'iss', 'aud', 'exp', 'iat'
+        - Checks standard claims: 'iss', 'aud', 'exp', 'nbf', 'iat'
         - Checks extra required claims if 'required_claims' is provided.
+        - Enforces organization_policy: requires 'org_id' when set to "required",
+          and checks it against organization_id when an allowlist is configured.
 
         Args:
             access_token: The JWT access token to verify
@@ -420,6 +491,9 @@ class ApiClient:
             MissingRequiredArgumentError: If no token is provided.
             VerifyAccessTokenError: If verification fails (signature, claims mismatch, etc.).
             DomainsResolverError: If domains resolver function fails.
+            MissingOrganizationError: If organization_policy is "required" and the token has no org_id claim.
+            OrganizationNotAllowedError: If the token's org_id is not in the organization_id allowlist.
+            AuthServerUnavailableError: If the OIDC discovery document or JWKS cannot be reached.
         """
         if not access_token:
             raise MissingRequiredArgumentError("access_token")
@@ -473,7 +547,8 @@ class ApiClient:
         except VerifyAccessTokenError:
             raise
         except Exception as e:
-            raise VerifyAccessTokenError(
+            error_class = AuthServerUnavailableError if is_auth_server_outage(e) else VerifyAccessTokenError
+            raise error_class(
                 f"Failed to fetch OIDC discovery metadata: {str(e)}"
             ) from e
 
@@ -504,7 +579,8 @@ class ApiClient:
         except VerifyAccessTokenError:
             raise
         except Exception as e:
-            raise VerifyAccessTokenError(
+            error_class = AuthServerUnavailableError if is_auth_server_outage(e) else VerifyAccessTokenError
+            raise error_class(
                 f"Failed to fetch JWKS: {str(e)}"
             ) from e
 
@@ -552,6 +628,12 @@ class ApiClient:
         now = int(time.time())
         if "exp" not in claims or now >= claims["exp"]:
             raise VerifyAccessTokenError("Token is expired")
+        nbf = claims.get("nbf")
+        if nbf is not None:
+            if isinstance(nbf, bool) or not isinstance(nbf, (int, float)):
+                raise VerifyAccessTokenError("Invalid 'nbf' claim in token")
+            if now < nbf:
+                raise VerifyAccessTokenError("Token is not yet valid")
         if "iat" not in claims:
             raise VerifyAccessTokenError("Missing 'iat' claim in token")
 
@@ -559,6 +641,15 @@ class ApiClient:
         for rc in required_claims:
             if rc not in claims:
                 raise VerifyAccessTokenError(f"Missing required claim: {rc}")
+
+        # Organization policy enforcement
+        if self.options.organization_policy == "required":
+            org_id = claims.get("org_id")
+            if not isinstance(org_id, str) or not org_id:
+                raise MissingOrganizationError("Token missing required 'org_id' claim")
+            if self._allowed_org_ids is not None and org_id not in self._allowed_org_ids:
+                logger.warning("Rejected token with org_id %r not in the organization_id allowlist", org_id)
+                raise OrganizationNotAllowedError("Token org_id is not in the allowed list")
 
         return claims
 
@@ -653,7 +744,12 @@ class ApiClient:
 
         return claims
 
-    async def get_access_token_for_connection(self, options: dict[str, Any]) -> dict[str, Any]:
+    async def get_access_token_for_connection(
+        self,
+        options: dict[str, Any],
+        *,
+        verified: Optional[VerifiedToken] = None,
+    ) -> dict[str, Any]:
         """
         Retrieves a token for a connection.
 
@@ -661,10 +757,17 @@ class ApiClient:
             options: Options for retrieving an access token for a connection.
                 Must include 'connection' and 'access_token' keys.
                 May optionally include 'login_hint'.
+            verified: The already-verified token, supplied by a caller that has verified it (for
+                      example an MCP server). When omitted and a token_store is configured, the
+                      token is verified here before any cache lookup.
 
         Raises:
             GetAccessTokenForConnectionError: If there was an issue requesting the access token.
             ApiError: If the token exchange endpoint returns an error.
+            VerifyAccessTokenError: If a store is configured and either verified is omitted and the token fails verification, or verified is supplied but does not match the access token being exchanged.
+            MissingOrganizationError: If a store is configured, verified is omitted, organization_policy is "required" and the token has no org_id claim.
+            OrganizationNotAllowedError: If a store is configured, verified is omitted and the token's org_id is not in the organization_id allowlist.
+            AuthServerUnavailableError: If a store is configured, verified is omitted and the OIDC discovery document or JWKS cannot be reached.
 
         Returns:
             Dictionary containing the token response with access_token, expires_in, and scope.
@@ -673,8 +776,8 @@ class ApiClient:
         SUBJECT_TYPE_ACCESS_TOKEN = "urn:ietf:params:oauth:token-type:access_token"  # noqa S105
         REQUESTED_TOKEN_TYPE_FEDERATED_CONNECTION_ACCESS_TOKEN = "http://auth0.com/oauth/token-type/federated-connection-access-token"  # noqa S105
         GRANT_TYPE_FEDERATED_CONNECTION_ACCESS_TOKEN = "urn:auth0:params:oauth:grant-type:token-exchange:federated-connection-access-token"  # noqa S105
-        connection = options.get("connection")
-        access_token = options.get("access_token")
+        connection = options.get("connection", "")
+        access_token = options.get("access_token", "")
 
         if not connection:
             raise MissingRequiredArgumentError("connection")
@@ -686,6 +789,29 @@ class ApiClient:
         client_secret = self.options.client_secret
         if not client_id or not client_secret:
             raise GetAccessTokenForConnectionError("You must configure the SDK with a client_id and client_secret to use get_access_token_for_connection.")
+
+        cache_key = None
+        if self._token_vault_cache is not None:
+            if verified is None:
+                claims = await self.verify_access_token(access_token)
+                verified = VerifiedToken(access_token=access_token, claims=claims)
+            elif verified.access_token != access_token:
+                # Claims must belong to the token being exchanged or a caller could read another token's entry.
+                raise VerifyAccessTokenError(
+                    "verified token does not match the access token being exchanged"
+                )
+            cache_key = self._token_vault_cache.cache_key(
+                tenant=self.options.domain or "",
+                client_id=self.options.client_id or "",
+                sub=verified.claims.get("sub"),
+                connection=connection,
+                login_hint=options.get("login_hint"),
+            )
+
+        if cache_key is not None:
+            hit = await self._token_vault_cache.lookup(cache_key)
+            if hit is not None:
+                return hit
 
         metadata = await self._discover()
 
@@ -745,11 +871,17 @@ class ApiClient:
                 except (TypeError, ValueError):
                     raise ApiError("invalid_response", "expires_in is not an integer.", 502)
 
-                return {
+                result = {
                     "access_token": access_token,
+                    "expires_in": expires_in,
                     "expires_at": int(time.time()) + expires_in,
                     "scope": token_endpoint_response.get("scope", "")
                 }
+
+                if cache_key is not None:
+                    await self._token_vault_cache.write(cache_key, result)
+
+                return result
 
         except httpx.TimeoutException as exc:
             raise ApiError(
@@ -969,6 +1101,8 @@ class ApiClient:
         access_token: str,
         audience: str,
         scope: Optional[str] = None,
+        *,
+        verified: Optional[VerifiedToken] = None,
     ) -> OnBehalfOfTokenResult:
         """
         Exchange an Auth0 access token for another Auth0 access token targeting a downstream API
@@ -981,6 +1115,10 @@ class ApiClient:
             access_token: The Auth0 access token to exchange
             audience: Target API identifier for the exchanged access token
             scope: Optional space-separated OAuth 2.0 scopes to request
+            verified: The already-verified token, supplied by a caller that has verified it (for
+                      example an MCP server). When omitted and a token_store is configured, the
+                      token is verified here before any cache lookup. Its claims must carry sub
+                      and iss, otherwise caching is skipped with a warning.
 
         Returns:
             Dictionary containing:
@@ -991,13 +1129,38 @@ class ApiClient:
             - token_type (str, optional): Token type (typically "Bearer")
             - issued_token_type (str, optional): RFC 8693 issued token type identifier
 
+        Caching is enabled only when a token_store is configured on the client. Without a store
+        every call performs a fresh exchange and nothing is cached. The scope_matching option
+        controls whether a cached token is reused only on an exact scope match ("strict") or
+        whenever its granted scopes cover the request ("non_strict").
+
         Raises:
             MissingRequiredArgumentError: If required parameters are missing
+            VerifyAccessTokenError: If a store is configured and either verified is omitted and the token fails verification, or verified is supplied but does not match the access token being exchanged
+            MissingOrganizationError: If a store is configured, verified is omitted, organization_policy is "required" and the token has no org_id claim
+            OrganizationNotAllowedError: If a store is configured, verified is omitted and the token's org_id is not in the organization_id allowlist
+            AuthServerUnavailableError: If a store is configured, verified is omitted and the OIDC discovery document or JWKS cannot be reached
             GetTokenByExchangeProfileError: If client credentials are not configured or validation fails
             ApiError: If the token endpoint returns an error
         """
         if not audience:
             raise MissingRequiredArgumentError("audience")
+
+        identity = None
+        if self._obo_cache is not None:
+            if verified is None:
+                claims = await self.verify_access_token(access_token)
+                verified = VerifiedToken(access_token=access_token, claims=claims)
+            elif verified.access_token != access_token:
+                # The cache identity comes from the verified claims, so those claims must belong
+                # to the token being exchanged or a caller could read back another token's entry.
+                raise VerifyAccessTokenError("verified token does not match the access token being exchanged")
+            identity = self._obo_cache.identity(verified)
+
+        if identity is not None:
+            hit = await self._obo_cache.lookup(identity, audience, scope)
+            if hit is not None:
+                return hit
 
         result = await self.get_token_by_exchange_profile(
             subject_token=access_token,
@@ -1020,7 +1183,165 @@ class ApiClient:
         if "issued_token_type" in result:
             obo_result["issued_token_type"] = result["issued_token_type"]
 
+        if identity is not None:
+            await self._obo_cache.write(identity, audience, scope, obo_result)
+
         return obo_result
+
+    async def get_client_credentials_token(
+        self,
+        audience: str,
+        scope: Optional[str] = None,
+    ) -> ClientCredentialsTokenResult:
+        """
+        Obtain a client credentials (M2M) access token for a server-to-server call.
+
+        Args:
+            audience: Target API identifier for the access token
+            scope: Optional space-separated OAuth 2.0 scopes to request
+
+        Returns:
+            Dictionary containing:
+            - access_token (str): The access token
+            - expires_in (int): Token lifetime in seconds
+            - expires_at (int): Absolute expiration time as a Unix timestamp in seconds, calculated by the SDK from expires_in
+            - scope (str, optional): Granted scopes, if returned by Auth0
+            - token_type (str, optional): Token type, if returned by Auth0
+
+        Raises:
+            MissingRequiredArgumentError: If audience is not provided
+            GetClientCredentialsTokenError: If client credentials are not configured or token endpoint is missing
+            ApiError: If the token endpoint returns an error or a malformed response
+        """
+        if not audience:
+            raise MissingRequiredArgumentError("audience")
+
+        client_id = self.options.client_id
+        client_secret = self.options.client_secret
+        if not client_id or not client_secret:
+            raise GetClientCredentialsTokenError(
+                "Client credentials are required to use get_client_credentials_token. "
+                "Configure client_id and client_secret in ApiClientOptions to use this feature"
+            )
+
+        # Check cache before making a network call
+        cache_key = None
+        if self._token_store is not None:
+            cache_key = m2m_cache_key(tenant=self.options.domain, client_id=client_id, audience=audience, scopes=scope)
+
+            cached = None
+            try:
+                cached = await self._token_store.get(cache_key)
+            except Exception as exc:
+                logger.warning("Token store read failed, treating as cache miss: %s", exc)
+
+            if cached is not None:
+                if "access_token" not in cached or "expires_at" not in cached:
+                    logger.warning("Token store returned a malformed entry, treating as cache miss")
+                elif is_fresh(cached["expires_at"], int(time.time())):
+                    hit: ClientCredentialsTokenResult = {
+                        "access_token": cached["access_token"],
+                        "expires_in": cached["expires_at"] - int(time.time()),
+                        "expires_at": cached["expires_at"],
+                    }
+                    if "granted_scopes" in cached:
+                        hit["scope"] = cached["granted_scopes"]
+                    if "token_type" in cached:
+                        hit["token_type"] = cached["token_type"]
+                    return hit
+
+        metadata = await self._discover()
+        token_endpoint = metadata.get("token_endpoint")
+        if not token_endpoint:
+            raise GetClientCredentialsTokenError(
+                "Token endpoint missing in OIDC metadata. "
+                "Verify your domain configuration and that the OIDC discovery endpoint is accessible"
+            )
+
+        params: dict[str, str] = {
+            "grant_type": "client_credentials",
+            "audience": audience,
+        }
+
+        if scope:
+            params["scope"] = scope
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(self.options.timeout)) as client:
+                response = await client.post(
+                    token_endpoint,
+                    data=params,
+                    auth=(client_id, client_secret)
+                )
+
+                if response.status_code != 200:
+                    error_data = {}
+                    try:
+                        content_type = response.headers.get("content-type", "").lower()
+                        if "json" in content_type:
+                            error_data = response.json()
+                    except ValueError:
+                        pass  # Ignore JSON parse errors, use generic error message below
+
+                    raise ApiError(
+                        error_data.get("error", "client_credentials_error"),
+                        error_data.get("error_description", "Failed to get client credentials token."),
+                        response.status_code
+                    )
+
+                # Auth0 always sends both fields, so a missing expires_in is an error rather than a guessed lifetime.
+                try:
+                    token_response = response.json()
+                    access_token = token_response["access_token"]
+                    expires_in = int(token_response["expires_in"])
+                except (ValueError, KeyError, TypeError):
+                    raise ApiError("invalid_response", "Token endpoint returned a malformed response.", 502)
+
+                if not isinstance(access_token, str) or not access_token:
+                    raise ApiError("invalid_response", "Missing or invalid access_token in response.", 502)
+
+                cc_result: ClientCredentialsTokenResult = {
+                    "access_token": access_token,
+                    "expires_in": expires_in,
+                    "expires_at": int(time.time()) + expires_in,
+                }
+
+                # scope is not guaranteed in the client credentials response
+                if "scope" in token_response:
+                    cc_result["scope"] = token_response["scope"]
+                if "token_type" in token_response:
+                    cc_result["token_type"] = token_response["token_type"]
+
+        except httpx.TimeoutException as exc:
+            raise ApiError(
+                "timeout_error",
+                f"Request to token endpoint timed out: {str(exc)}",
+                504,
+                exc
+            )
+        except httpx.HTTPError as exc:
+            raise ApiError(
+                "network_error",
+                f"Network error occurred: {str(exc)}",
+                502,
+                exc
+            )
+
+        if cache_key is not None:
+            try:
+                entry: dict[str, Any] = {
+                    "access_token": cc_result["access_token"],
+                    "expires_at": cc_result["expires_at"],
+                }
+                if "scope" in cc_result:
+                    entry["granted_scopes"] = cc_result["scope"]
+                if "token_type" in cc_result:
+                    entry["token_type"] = cc_result["token_type"]
+                await self._token_store.set(cache_key, entry)
+            except Exception as exc:
+                logger.warning("Token store write failed, token still returned: %s", exc)
+
+        return cc_result
 
     # ===== Private Methods =====
 
@@ -1171,6 +1492,10 @@ class ApiClient:
             error: The error to prepare
             auth_scheme: The authentication scheme that was used ("bearer" or "dpop")
         """
+        if error.get_status_code() >= 500:
+            error._headers = {}
+            return error
+
         error_code = error.get_error_code()
         error_description = error.get_error_description()
 

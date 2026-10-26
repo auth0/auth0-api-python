@@ -3,6 +3,7 @@ Utility functions for OIDC discovery and JWKS fetching (asynchronously)
 using httpx or a custom fetch approach.
 """
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -80,6 +81,25 @@ def normalize_domain(domain: str) -> str:
         )
 
     return f"https://{host}/"
+
+
+def is_auth_server_outage(error: Exception) -> bool:
+    """
+    Check whether a discovery or JWKS fetch error means the auth server is down or overloaded.
+
+    Args:
+        error: The exception raised while fetching.
+
+    Returns:
+        True for connection errors, timeouts, HTTP 5xx and HTTP 429. False for anything else.
+    """
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        return status >= 500 or status == 429
+    return isinstance(
+        error,
+        (httpx.NetworkError, httpx.TimeoutException, ConnectionError, TimeoutError, asyncio.TimeoutError),
+    )
 
 
 async def fetch_oidc_metadata(

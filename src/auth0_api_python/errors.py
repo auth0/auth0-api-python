@@ -56,6 +56,24 @@ class VerifyAccessTokenError(BaseAuthError):
         return "invalid_token"
 
 
+class AuthServerUnavailableError(VerifyAccessTokenError):
+    """Error raised when the OIDC discovery document or JWKS cannot be reached."""
+
+    def get_status_code(self) -> int:
+        return 503
+
+    def get_error_code(self) -> str:
+        return "auth_server_unavailable"
+
+
+class MissingOrganizationError(VerifyAccessTokenError):
+    """Error raised when organization_policy is 'required' but the token has no org_id claim."""
+
+
+class OrganizationNotAllowedError(VerifyAccessTokenError):
+    """Error raised when the token's org_id claim is not in the organization_id allowlist."""
+
+
 class InvalidAuthSchemeError(BaseAuthError):
     """Error raised when the provided authentication scheme is unsupported."""
 
@@ -114,6 +132,16 @@ class GetTokenByExchangeProfileError(BaseAuthError):
 
     def get_error_code(self) -> str:
         return "get_token_by_exchange_profile_error"
+
+
+class GetClientCredentialsTokenError(BaseAuthError):
+    """Error raised when a client credentials token request fails before the network call."""
+
+    def get_status_code(self) -> int:
+        return 400
+
+    def get_error_code(self) -> str:
+        return "get_client_credentials_token_error"
 
 
 class ApiError(BaseAuthError):

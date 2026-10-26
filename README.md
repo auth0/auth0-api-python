@@ -18,6 +18,7 @@ This SDK provides comprehensive support for securing APIs with Auth0-issued acce
 ### **Core Features**
 - **Unified Entry Point**: `verify_request()` - automatically detects and validates Bearer or DPoP schemes
 - **Multi-Custom Domain (MCD)** - Accept tokens from multiple Auth0 domains with static lists or dynamic resolvers
+- **Organization Policy** - Enforce and optionally allowlist the `org_id` claim on incoming tokens
 - **OIDC Discovery** - Automatic fetching of Auth0 metadata and JWKS with per-issuer caching
 - **JWT Validation** - Complete RS256 signature verification with claim validation
 - **DPoP Proof Verification** - Full RFC 9449 compliance with ES256 signature validation
@@ -95,6 +96,12 @@ asyncio.run(main())
 
 In this example, the returned dictionary contains the decoded claims (like `sub`, `scope`, etc.) from the verified token.
 
+If the OIDC discovery document or the JWKS request cannot be reached (connection error, timeout, or an HTTP `5xx` or `429` response), the method raises `AuthServerUnavailableError`, a subclass of `VerifyAccessTokenError` with status `503` and error code `auth_server_unavailable`. Other fetch failures, such as a `404` or a malformed response, still raise `VerifyAccessTokenError`. `verify_request()` raises the same error and sets no `WWW-Authenticate` header, so clients retry later instead of requesting a new token.
+
+HTTP status codes are checked only for the default HTTP client. With `custom_fetch`, only a connection error or timeout raised by your function is reported as `AuthServerUnavailableError`.
+
+This error comes from token verification only. Where verification is skipped, such as `get_client_credentials_token()` or an exchange with `verified=`, a failed discovery request raises the underlying `httpx` error.
+
 ### 4. Get an access token for a connection
 
 If you need to get an access token for an upstream idp via a connection, you can use the `get_access_token_for_connection` method:
@@ -120,6 +127,8 @@ async def main():
 
 asyncio.run(main())
 ```
+
+When a `token_store` is configured on `ApiClientOptions`, the connection token is cached by caller, connection and `login_hint`, skipping the exchange on repeat calls. Pass `verified=` with a `VerifiedToken` built from the `verify_access_token()` claims to reuse that verification rather than verifying a second time. See [Access Token for a Connection](EXAMPLES.md#access-token-for-a-connection-token-vault) for a full example and setup requirements.
 
 More info https://auth0.com/docs/secure/tokens/token-vault
 
@@ -249,6 +258,25 @@ to Auth0 access-token exchange. In the current implementation, the SDK forwards 
 token as the `subject_token` and relies on Auth0 to handle any DPoP-specific behavior for that token.
 The OBO result only includes access-token-oriented fields. It does not expose `id_token` or
 `refresh_token`.
+
+Configuring a `token_store` on `ApiClientOptions` caches the exchanged token, so a repeat call for
+the same caller, audience, organization, scopes, and session reuses it instead of exchanging again.
+With no `token_store`, every call performs a fresh exchange, matching the existing behavior above.
+
+#### Client Credentials for Server-to-Server Calls
+
+Use `get_client_credentials_token()` to obtain an M2M access token for server-to-server calls
+using the OAuth 2.0 client credentials grant.
+
+```python
+result = await api_client.get_client_credentials_token(
+    audience="https://downstream-api.example.com",
+    scope="read:data",
+)
+# call downstream API with result["access_token"]
+```
+
+See the **[Client Credentials example](EXAMPLES.md#client-credentials-for-server-to-server-calls)** for a full example that calls a downstream API, plus the caching behavior.
 
 #### Inspecting Delegation After Token Verification
 
@@ -406,12 +434,32 @@ For hybrid mode (migration scenarios), resolver patterns, error handling, and ca
 
 - **[Multi-Custom Domain Guide](docs/MultipleCustomDomain.md)** - Configuration modes, resolver patterns, migration, error handling
 - **[Caching Guide](docs/Caching.md)** - Cache tuning, custom adapters (Redis, Memcached)
+- **[Token Storage Guide](docs/TokenStorage.md)** - Caching OBO exchanges, custom TokenStore backends, at-rest encryption
 
 ### 8. Anonymous Callers
 
 [Anonymous Sessions](https://auth0.com/docs/manage-users/sessions/anonymous-sessions) give a visitor an Auth0 identity before they log in. Session creation happens in your web application. This SDK only validates the tokens they produce. The access token is a standard Auth0 Bearer JWT, so `verify_access_token()` and `verify_request()` validate it exactly like any other token. The only difference is the `sub` claim, which starts with `anon@`.
 
 An anonymous token passes verification by default. Deciding whether an anonymous caller is authorized is your application's responsibility. See [Anonymous Callers](EXAMPLES.md#anonymous-callers) for allow, block-per-route, and block-globally patterns.
+
+### 9. Organization Policy
+
+For APIs that need to enforce an Auth0 Organization context on every request, optionally restricted to a specific set of Organizations:
+
+```python
+from auth0_api_python import ApiClient, ApiClientOptions
+
+api_client = ApiClient(ApiClientOptions(
+    domain="tenant.auth0.com",
+    audience="https://api.example.com",
+    organization_policy="required",
+    organization_id=["org_abc123", "org_def456"]
+))
+
+claims = await api_client.verify_access_token(access_token)
+```
+
+See the **[Organization Policy Guide](docs/OrganizationPolicy.md)** for policy modes, the allowlist, and error handling.
 
 ## Feedback
 
