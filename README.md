@@ -121,6 +121,7 @@ async def main():
     connection = "my-connection" # The Auth0 connection to the upstream idp
     access_token = "..." # The Auth0 access token to exchange
 
+    await api_client.verify_access_token(access_token) # Verify first so the organization policy applies
     connection_access_token = await api_client.get_access_token_for_connection({"connection": connection, "access_token": access_token})
     # The returned token is the access token for the upstream idp
     print(connection_access_token)

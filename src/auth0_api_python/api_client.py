@@ -884,6 +884,9 @@ class ApiClient:
                 except (TypeError, ValueError):
                     raise ApiError("invalid_response", "expires_in is not an integer.", 502)
 
+                if expires_in < 0:
+                    raise ApiError("invalid_response", "expires_in cannot be negative.", 502)
+
                 result = {
                     "access_token": access_token,
                     "expires_in": expires_in,
@@ -1312,6 +1315,9 @@ class ApiClient:
 
                 if not isinstance(access_token, str) or not access_token:
                     raise ApiError("invalid_response", "Missing or invalid access_token in response.", 502)
+
+                if expires_in < 0:
+                    raise ApiError("invalid_response", "expires_in cannot be negative.", 502)
 
                 cc_result: ClientCredentialsTokenResult = {
                     "access_token": access_token,

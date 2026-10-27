@@ -2924,6 +2924,31 @@ async def test_get_access_token_for_connection_expires_in_not_integer(httpx_mock
     assert err.value.status_code == 502
 
 
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_expires_in_negative(httpx_mock: HTTPXMock):
+    httpx_mock.add_response(method="GET", url=DISCOVERY_URL, json={"token_endpoint": TOKEN_ENDPOINT})
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        status_code=200,
+        json={"access_token": "abc123", "expires_in": -1}
+    )
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+    ))
+    with pytest.raises(ApiError) as err:
+        await api_client.get_access_token_for_connection({
+            "connection": "test-conn",
+            "access_token": "user-token"
+        })
+    assert err.value.code == "invalid_response"
+    assert "negative" in str(err.value).lower()
+    assert err.value.status_code == 502
+
+
 # ===== Custom Token Exchange Tests =====
 
 
@@ -4027,6 +4052,7 @@ async def test_get_client_credentials_token_no_scope_in_response(
         {"json": {"access_token": "", "expires_in": 3600}},
         {"json": {"access_token": "t"}},
         {"json": {"access_token": "t", "expires_in": "soon"}},
+        {"json": {"access_token": "t", "expires_in": -1}},
     ],
 )
 async def test_get_client_credentials_token_malformed_response(

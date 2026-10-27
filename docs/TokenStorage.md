@@ -190,6 +190,7 @@ api_client = ApiClient(ApiClientOptions(
 ))
 ```
 
-An index member holds a hashed `token_key`, the granted scopes, and an expiry, never a bearer
-token, so it is not encrypted. The tokens themselves stay encrypted under their own keys as
-described above.
+An index member holds a `token_key`, the granted scopes, and an expiry, never a bearer token, so
+it is not encrypted. The `token_key` is the caller's `sub` in plain text followed by a hash, so
+anyone who can read the store can see which callers have entries. The tokens themselves stay
+encrypted under their own keys as described above.
