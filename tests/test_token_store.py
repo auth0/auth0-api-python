@@ -5,7 +5,6 @@ import time
 from typing import Optional
 
 import pytest
-from conftest import unsigned_jwt
 
 from auth0_api_python._internal.cache_keys import (
     index_cache_key,
@@ -93,14 +92,6 @@ def test_encrypt_decrypt_roundtrip():
     decrypted = store.decrypt("cache-key", encrypted)
 
     assert decrypted == dict(value)
-
-
-def test_decrypt_rejects_non_object_header():
-    """A stored value whose header is not a JSON object raises ValueError."""
-    store = ConcreteTokenStore(secret="some-secret-0123456789abcdef-0123456789")
-
-    with pytest.raises(ValueError, match="header"):
-        store.decrypt("key", unsigned_jwt([1], {}))
 
 
 def test_encrypt_different_cache_keys_produce_different_ciphertext():

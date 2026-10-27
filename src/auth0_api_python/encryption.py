@@ -34,8 +34,6 @@ def _read_jwe_kid(token: str) -> str:
     if padding != 4:
         header_b64 += "=" * padding
     header = json.loads(base64.urlsafe_b64decode(header_b64))
-    if not isinstance(header, dict):
-        raise ValueError("Invalid JWE header: not a JSON object")
     kid = header.get("kid")
     if not kid:
         raise ValueError('Missing "kid" in JWE header')

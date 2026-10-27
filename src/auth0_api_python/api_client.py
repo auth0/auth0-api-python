@@ -629,16 +629,11 @@ class ApiClient:
                 raise VerifyAccessTokenError("Audience mismatch (single aud)")
 
         now = int(time.time())
-        if "exp" not in claims:
-            raise VerifyAccessTokenError("Token is expired")
-        exp = claims["exp"]
-        if isinstance(exp, bool) or not isinstance(exp, (int, float)) or (isinstance(exp, float) and not math.isfinite(exp)):
-            raise VerifyAccessTokenError("Invalid 'exp' claim in token")
-        if now >= exp:
+        if "exp" not in claims or now >= claims["exp"]:
             raise VerifyAccessTokenError("Token is expired")
         nbf = claims.get("nbf")
         if nbf is not None:
-            if isinstance(nbf, bool) or not isinstance(nbf, (int, float)) or (isinstance(nbf, float) and not math.isfinite(nbf)):
+            if isinstance(nbf, bool) or not isinstance(nbf, (int, float)):
                 raise VerifyAccessTokenError("Invalid 'nbf' claim in token")
             if now < nbf:
                 raise VerifyAccessTokenError("Token is not yet valid")
