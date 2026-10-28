@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional, Union
@@ -508,6 +509,8 @@ class ApiClient:
 
         # Reject symmetric algorithms
         alg = header.get('alg', '')
+        if not isinstance(alg, str):
+            raise VerifyAccessTokenError("Token header 'alg' must be a string")
         if alg.startswith('HS'):
             raise VerifyAccessTokenError(
                 f"Symmetric algorithm '{alg}' is not supported. "
@@ -675,7 +678,10 @@ class ApiClient:
         if not http_method or not http_url:
             raise MissingRequiredArgumentError("http_method/http_url")
 
-        header = get_unverified_header(proof)
+        try:
+            header = get_unverified_header(proof)
+        except Exception:
+            raise InvalidDpopProofError("Failed to parse DPoP proof header")
 
         if header.get("typ") != "dpop+jwt":
             raise InvalidDpopProofError("Unexpected JWT 'typ' header parameter value")
@@ -697,7 +703,11 @@ class ApiClient:
         if jwk_dict.get("crv") != "P-256":
             raise InvalidDpopProofError("Only P-256 curve is supported")
 
-        public_key = JsonWebKey.import_key(jwk_dict)
+        try:
+            public_key = JsonWebKey.import_key(jwk_dict)
+        except Exception:
+            raise InvalidDpopProofError("Missing or invalid jwk in header")
+
         try:
             claims = self._dpop_jwt.decode(proof, public_key)
         except Exception as e:
@@ -720,13 +730,16 @@ class ApiClient:
         offset = getattr(self.options, "dpop_iat_offset", 300)    # default 5 minutes
         leeway = getattr(self.options, "dpop_iat_leeway", 30)     # default 30 seconds
 
-        if not isinstance(iat, (int, float)):
-            raise InvalidDpopProofError("Invalid iat claim (must be integer or float)")
+        if not isinstance(iat, (int, float)) or (isinstance(iat, float) and not math.isfinite(iat)):
+            raise InvalidDpopProofError("Invalid iat claim (must be a finite number)")
 
         if iat < now - offset:
             raise InvalidDpopProofError("DPoP Proof iat is too old")
         elif iat > now + leeway:
             raise InvalidDpopProofError("DPoP Proof iat is from the future")
+
+        if not isinstance(claims["htm"], str):
+            raise InvalidDpopProofError("htm claim must be a string")
 
         if claims["htm"].lower() != http_method.lower():
             raise InvalidDpopProofError("DPoP Proof htm mismatch")
@@ -870,6 +883,9 @@ class ApiClient:
                     expires_in = int(expires_in_raw)
                 except (TypeError, ValueError):
                     raise ApiError("invalid_response", "expires_in is not an integer.", 502)
+
+                if expires_in < 0:
+                    raise ApiError("invalid_response", "expires_in cannot be negative.", 502)
 
                 result = {
                     "access_token": access_token,
@@ -1299,6 +1315,9 @@ class ApiClient:
 
                 if not isinstance(access_token, str) or not access_token:
                     raise ApiError("invalid_response", "Missing or invalid access_token in response.", 502)
+
+                if expires_in < 0:
+                    raise ApiError("invalid_response", "expires_in cannot be negative.", 502)
 
                 cc_result: ClientCredentialsTokenResult = {
                     "access_token": access_token,

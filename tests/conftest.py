@@ -1,6 +1,7 @@
 """Shared test fixtures and helpers for auth0-api-python tests."""
 
 import base64
+import json
 import time
 import urllib.parse
 from typing import Optional
@@ -97,6 +98,15 @@ def mock_discovery(httpx_mock: HTTPXMock):
 
 
 # ===== Helper Functions =====
+
+def unsigned_jwt(header, payload) -> str:
+    """Build a JWT-shaped string from any JSON values, with a dummy signature."""
+
+    def encode(value):
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+
+    return f"{encode(header)}.{encode(payload)}.signature"
+
 
 def last_form(httpx_mock: HTTPXMock) -> dict[str, list[str]]:
     """Helper to read the last posted form data."""
