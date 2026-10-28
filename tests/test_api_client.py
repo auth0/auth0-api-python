@@ -1520,6 +1520,33 @@ async def test_verify_dpop_proof_fail_non_finite_iat(bad_iat):
     assert "invalid iat" in str(err.value).lower()
 
 @pytest.mark.asyncio
+async def test_verify_dpop_proof_fail_iat_too_large_for_float():
+    """
+    Test that a DPoP proof whose 'iat' is an integer too large to convert to a float fails verification.
+    """
+    access_token = "test_token"
+    dpop_proof = await generate_dpop_proof(
+        access_token=access_token,
+        http_method="GET",
+        http_url="https://api.example.com/resource",
+        iat_time=10**400
+    )
+
+    api_client = ApiClient(
+        ApiClientOptions(domain="auth0.local", audience="my-audience")
+    )
+
+    with pytest.raises(InvalidDpopProofError) as err:
+        await api_client.verify_dpop_proof(
+            access_token=access_token,
+            proof=dpop_proof,
+            http_method="GET",
+            http_url="https://api.example.com/resource"
+        )
+
+    assert "from the future" in str(err.value).lower()
+
+@pytest.mark.asyncio
 async def test_verify_dpop_proof_iat_exact_boundary_conditions():
     """
     Test IAT timing validation at exact boundary conditions.

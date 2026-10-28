@@ -122,16 +122,31 @@ def test_get_unverified_header_rejects_non_object(segment):
         get_unverified_header(unsigned_jwt(segment, {"iss": "https://tenant.auth0.com/"}))
 
 
+def _raise_recursion_error(*args, **kwargs):
+    raise RecursionError
+
+
 @pytest.mark.parametrize("index", [0, 1])
-def test_get_unverified_segments_reject_deeply_nested_json(index):
-    """Test that a segment nested too deep for the parser raises ValueError."""
+def test_get_unverified_segments_reject_deeply_nested_json(index, monkeypatch):
+    """Test that a segment the parser cannot handle for depth raises ValueError."""
+    monkeypatch.setattr("auth0_api_python.utils.json.loads", _raise_recursion_error)
+    parts = ["e30", "e30", "sig"]
+    decode = get_unverified_header if index == 0 else get_unverified_payload
+
+    with pytest.raises(ValueError, match="nested"):
+        decode(".".join(parts))
+
+
+@pytest.mark.parametrize("index", [0, 1])
+def test_get_unverified_segments_reject_real_deeply_nested_json(index):
+    """Test that a segment nested far deeper than the parser allows raises ValueError."""
     depth = 200_000
     deep = base64.urlsafe_b64encode(("[" * depth + "]" * depth).encode()).rstrip(b"=").decode()
     parts = ["e30", "e30", "sig"]
     parts[index] = deep
     decode = get_unverified_header if index == 0 else get_unverified_payload
 
-    with pytest.raises(ValueError, match="nested"):
+    with pytest.raises(ValueError):
         decode(".".join(parts))
 
 

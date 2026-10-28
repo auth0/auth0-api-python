@@ -731,7 +731,7 @@ class ApiClient:
         leeway = getattr(self.options, "dpop_iat_leeway", 30)     # default 30 seconds
 
         if not isinstance(iat, (int, float)) or (isinstance(iat, float) and not math.isfinite(iat)):
-            raise InvalidDpopProofError("Invalid iat claim (must be integer or float)")
+            raise InvalidDpopProofError("Invalid iat claim (must be a finite number)")
 
         if iat < now - offset:
             raise InvalidDpopProofError("DPoP Proof iat is too old")

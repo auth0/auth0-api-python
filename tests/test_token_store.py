@@ -323,8 +323,19 @@ def test_session_fingerprint_falls_back_to_sha256_for_non_object_payload():
     assert session_fingerprint(token) == hashlib.sha256(token.encode()).hexdigest()
 
 
+def test_session_fingerprint_falls_back_to_sha256_when_the_parser_runs_out_of_depth(monkeypatch):
+    """A payload the parser cannot handle for depth falls back to sha256 without raising."""
+    def raise_recursion_error(*args, **kwargs):
+        raise RecursionError
+
+    monkeypatch.setattr("auth0_api_python.utils.json.loads", raise_recursion_error)
+    token = "hdr.e30.sig"
+
+    assert session_fingerprint(token) == hashlib.sha256(token.encode()).hexdigest()
+
+
 def test_session_fingerprint_falls_back_to_sha256_for_deeply_nested_payload():
-    """A payload nested deep enough to exhaust the parser falls back to sha256 without raising."""
+    """A payload nested far deeper than the parser allows falls back to sha256 without raising."""
     depth = 200_000
     payload = base64.urlsafe_b64encode(("[" * depth + "]" * depth).encode()).rstrip(b"=").decode()
     token = f"hdr.{payload}.sig"
