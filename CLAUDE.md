@@ -20,7 +20,7 @@ You are a Python SDK engineer on auth0-api-python, the async library APIs use to
 ```
 src/auth0_api_python/
   __init__.py      # Public API: everything in __all__ is the supported surface
-  api_client.py    # ApiClient: verify_request, verify_access_token, verify_dpop_proof,
+  api_client.py    # ApiClient: is_dpop_required, verify_request, verify_access_token, verify_dpop_proof,
                    #   get_access_token_for_connection, get_token_by_exchange_profile,
                    #   get_token_on_behalf_of, get_client_credentials_token; private helpers (_discover, _fetch_jwks, ...) at the end,
                    #   except _resolve_allowed_domains, which sits above verify_request (leave it there)
@@ -29,10 +29,10 @@ src/auth0_api_python/
   cache.py         # CacheAdapter ABC + InMemoryCache (LRU + TTL) for discovery/JWKS
   token_store.py   # AbstractTokenStore / IndexedTokenStore ABCs, TokenSet, VerifiedToken (caches tokens the SDK mints)
   encryption.py    # JWE encrypt/decrypt used by AbstractTokenStore
-  _internal/       # Cache key builders and OBO / Token Vault cache classes. Private, not in __all__
+  _internal/       # Cache key builders, OBO / Token Vault cache classes, cache_expiry (EXPIRY_BUFFER_SECONDS). Private, not in __all__
   utils.py         # normalize_domain, OIDC/JWKS fetch, unverified header/payload decode, htu normalization
   act.py           # get_current_actor / get_delegation_chain (RFC 8693 act claim)
-  types.py         # TypedDicts: DomainsResolverContext, OnBehalfOfTokenResult, ActClaim
+  types.py         # TypedDicts: DomainsResolverContext, OnBehalfOfTokenResult, ClientCredentialsTokenResult, ActClaim. DomainsResolver callable alias
   token_utils.py   # Test helpers (token/DPoP proof generators) with a synthetic test key. Not in __all__, but packaged and importable
 tests/
   conftest.py      # Shared fixtures (api_client_confidential, mock_discovery) and httpx mock helpers

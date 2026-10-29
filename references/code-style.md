@@ -9,7 +9,7 @@
 
 ## Errors
 
-Every error subclasses `BaseAuthError` and defines its HTTP mapping:
+Every error subclasses `BaseAuthError`. A new error category defines its HTTP mapping. A specialization of an existing category (`MissingOrganizationError`, `OrganizationNotAllowedError` under `VerifyAccessTokenError`) inherits it:
 
 ```python
 class DomainsResolverError(BaseAuthError):
@@ -59,7 +59,7 @@ Public errors meant for integrators are exported from `__init__.py` (`ApiError`,
 - **Async I/O:** network calls use `httpx.AsyncClient`, or the integrator's `custom_fetch` when provided. Public verification and token methods are `async def`.
 - **Pluggable cache:** `CacheAdapter` ABC with `get` / `set` / `delete` / `clear`. `InMemoryCache` is the default. Entry TTL is `min(Cache-Control max-age, cache_ttl_seconds)` when the discovery/JWKS response sends `max-age`.
 - **Token store:** `AbstractTokenStore` ABC with `get` / `set` / `delete` plus `encrypt` / `decrypt`, separate from `CacheAdapter`. The helpers are opt-in: the SDK never calls them, so a store encrypts in its own `get` / `set`. `IndexedTokenStore` adds `add_index_member` / `list_index_members` for `scope_matching="non_strict"`. Cache classes and key builders live in `_internal/` and are not public. A store failure is logged and treated as a miss, never raised to the caller.
-- **Docstrings:** Google style with `Args:` / `Returns:` / `Raises:` sections on public methods.
+- **Docstrings:** Google style with `Args:` / `Returns:` / `Raises:` sections on public methods. Note: `verify_dpop_proof` predates this convention and uses a numbered list instead.
 - **Placement:** `api_client.py` has one banner, `# ===== Private Methods =====`. New public methods go above it after the existing ones, new helpers below it. In files without banners, put new code next to related code or at the end, never at an arbitrary position.
 
 ## Comments and docstrings

@@ -1,6 +1,6 @@
 # Commands
 
-These match `.github/workflows/test.yml` (Poetry and Python versions are set there) and `CONTRIBUTING.md`.
+The install, CI test, and lint commands match `.github/workflows/test.yml` (Poetry and Python versions are set there). `poetry install`, `poetry run pytest`, and `poetry build` also appear in `CONTRIBUTING.md`. The rest are local conveniences that no CI step runs.
 
 ```bash
 # Install dependencies and the package (CI runs both steps)
