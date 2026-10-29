@@ -1,12 +1,12 @@
 import asyncio
 import logging
 import math
+import sys
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional, Union
 
 import httpx
-from joserfc import jwk, jwt
 
 from ._internal.cache_expiry import is_fresh
 from ._internal.cache_keys import m2m_cache_key
@@ -47,6 +47,13 @@ from .utils import (
     normalize_url_for_htu,
     sha256_base64url,
 )
+
+# Authlib 1.6 remains the supported JOSE implementation on Python 3.9.
+# joserfc 1.7+ (and Authlib's dependency on it) requires Python 3.10+.
+if sys.version_info < (3, 10):
+    from authlib.jose import JsonWebKey, JsonWebToken
+else:
+    from joserfc import jwk, jwt
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +196,9 @@ class ApiClient:
         self._cache_ttl = options.cache_ttl_seconds
 
         self._dpop_algorithms = ["ES256"]
+        if sys.version_info < (3, 10):
+            self._jwt = JsonWebToken(self._jwt_algorithms)
+            self._dpop_jwt = JsonWebToken(self._dpop_algorithms)
 
     def is_dpop_required(self) -> bool:
         """Check if DPoP authentication is required."""
@@ -606,12 +616,18 @@ class ApiClient:
             raise VerifyAccessTokenError("No matching key found in JWKS")
 
         # Import public key and verify signature
-        public_key = jwk.import_key(matching_key_dict)
+        if sys.version_info < (3, 10):
+            public_key = JsonWebKey.import_key(matching_key_dict)
+        else:
+            public_key = jwk.import_key(matching_key_dict)
 
         if isinstance(access_token, str) and access_token.startswith("b'"):
             access_token = access_token[2:-1]
         try:
-            claims = jwt.decode(access_token, public_key, algorithms=self._jwt_algorithms).claims
+            if sys.version_info < (3, 10):
+                claims = self._jwt.decode(access_token, public_key)
+            else:
+                claims = jwt.decode(access_token, public_key, algorithms=self._jwt_algorithms).claims
         except Exception as e:
             raise VerifyAccessTokenError(f"Signature verification failed: {str(e)}") from e
 
@@ -707,12 +723,18 @@ class ApiClient:
             raise InvalidDpopProofError("Only P-256 curve is supported")
 
         try:
-            public_key = jwk.import_key(jwk_dict)
+            if sys.version_info < (3, 10):
+                public_key = JsonWebKey.import_key(jwk_dict)
+            else:
+                public_key = jwk.import_key(jwk_dict)
         except Exception:
             raise InvalidDpopProofError("Missing or invalid jwk in header")
 
         try:
-            claims = jwt.decode(proof, public_key, algorithms=self._dpop_algorithms).claims
+            if sys.version_info < (3, 10):
+                claims = self._dpop_jwt.decode(proof, public_key)
+            else:
+                claims = jwt.decode(proof, public_key, algorithms=self._dpop_algorithms).claims
         except Exception as e:
             raise InvalidDpopProofError(f"JWT signature verification failed: {e}")
 

@@ -1,12 +1,17 @@
+import sys
 import time
 import uuid
 from typing import Any, Optional, Union
 
-from joserfc import jwk, jwt
-from joserfc.jws import JWSRegistry
-from joserfc.registry import HeaderParameter
-
 from .utils import calculate_jwk_thumbprint, normalize_url_for_htu, sha256_base64url
+
+# Python 3.9 resolves to Authlib 1.6 (without joserfc); use its JOSE API there.
+if sys.version_info < (3, 10):
+    from authlib.jose import JsonWebKey, jwt
+else:
+    from joserfc import jwk, jwt
+    from joserfc.jws import JWSRegistry
+    from joserfc.registry import HeaderParameter
 
 # A private RSA JWK for test usage.
 
@@ -82,7 +87,10 @@ async def generate_token(
         token_claims["aud"] = audience
 
 
-    key = jwk.import_key(PRIVATE_JWK)
+    if sys.version_info < (3, 10):
+        key = JsonWebKey.import_key(PRIVATE_JWK)
+    else:
+        key = jwk.import_key(PRIVATE_JWK)
 
     header = {"alg": "RS256", "kid": PRIVATE_JWK["kid"]}
     token = jwt.encode(header, token_claims, key)
@@ -168,15 +176,19 @@ async def generate_dpop_proof(
     if header_overrides:
         header.update(header_overrides)
 
-    key = jwk.import_key(PRIVATE_EC_JWK)
-    registry = JWSRegistry(
-        header_registry={
-            name: HeaderParameter("test override", lambda _: None)
-            for name in ("typ", "jwk")
-            if name in (header_overrides or {})
-        }
-    )
-    token = jwt.encode(header, proof_claims, key, registry=registry)
+    if sys.version_info < (3, 10):
+        key = JsonWebKey.import_key(PRIVATE_EC_JWK)
+        token = jwt.encode(header, proof_claims, key)
+    else:
+        key = jwk.import_key(PRIVATE_EC_JWK)
+        registry = JWSRegistry(
+            header_registry={
+                name: HeaderParameter("test override", lambda _: None)
+                for name in ("typ", "jwk")
+                if name in (header_overrides or {})
+            }
+        )
+        token = jwt.encode(header, proof_claims, key, registry=registry)
     # Ensure we return a string, not bytes
     return token.decode('utf-8') if isinstance(token, bytes) else token
 
