@@ -5,7 +5,7 @@
 - `snake_case` functions, methods, and options. `PascalCase` classes. `UPPER_SNAKE` module constants (`RESERVED_PARAMS`, `TOKEN_EXCHANGE_GRANT_TYPE`).
 - Private helpers carry a leading underscore (`_discover`, `_fetch_jwks`, `_prepare_error`) and sit together after the public methods of `ApiClient`. The one pre-existing exception is `_resolve_allowed_domains`, above `verify_request`. Leave it there.
 - Error classes end in `Error` and live in `errors.py`.
-- Type hints use builtin generics (`dict[str, Any]`, `list[str]`) with `Optional` / `Union` from `typing`. ruff `UP` targets py39, so do not use `X | Y` syntax.
+- Type hints use builtin generics (`dict[str, Any]`, `list[str]`) with `Optional` / `Union` from `typing`. ruff `UP` targets the `pyproject.toml` Python floor, so do not use `X | Y` syntax while that floor is below 3.10.
 
 ## Errors
 
@@ -70,5 +70,5 @@ Enforced on every change (code, tests, docs, commit messages):
 2. **Docstring format.** One-line description, then `Args`, then `Returns` / `Raises`. No design rationale, that belongs in the PR description.
 3. **Plain hyphens only.** No em or en dashes in comments, docstrings, commit messages, or Markdown.
 4. **No semicolon clause-splicing.** Split independent clauses into separate sentences.
-5. **No internal references.** No ticket numbers, planning-doc paths, internal links, or cross-SDK comparisons ("same as the Node SDK").
+5. **No internal references.** No ticket numbers, planning-doc paths, internal links, or references to other SDKs as a comparison or justification.
 6. **Helpers stay grouped.** Never interleave a private helper between public methods.

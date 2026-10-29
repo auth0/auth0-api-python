@@ -1,6 +1,6 @@
 # Commands
 
-These match `.github/workflows/test.yml` (Poetry 2.2.1, Python 3.9 to 3.12) and `CONTRIBUTING.md`.
+These match `.github/workflows/test.yml` (Poetry and Python versions are set there) and `CONTRIBUTING.md`.
 
 ```bash
 # Install dependencies and the package (CI runs both steps)

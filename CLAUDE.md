@@ -54,7 +54,7 @@ Before changing a flow (Bearer/DPoP verification, token exchange, MCD, caching),
 
 ### Always Do
 
-- Run `poetry run pytest` and `poetry run ruff check .` before committing (both run in CI on Python 3.9 to 3.12).
+- Run `poetry run pytest` and `poetry run ruff check .` before committing (both run in CI across the Python matrix in `.github/workflows/test.yml`).
 - Make surgical changes: touch only what the request requires. Do not refactor or reformat adjacent code.
 - Follow existing style and naming. Add new public `ApiClient` methods after the existing public methods, above the `# ===== Private Methods =====` banner in `api_client.py`. Add new private helpers below it. Never reorder existing declarations.
 - Add unit tests for new functionality, marked `@pytest.mark.asyncio` when async, mocking HTTP with `pytest-httpx` (no real network calls).
@@ -63,7 +63,7 @@ Before changing a flow (Bearer/DPoP verification, token exchange, MCD, caching),
 - Export any new public symbol through `__init__.py` `__all__`.
 - Update `README.md` and `EXAMPLES.md` (and `docs/*.md` when caching or MCD behaviour changes) in the same PR when changing the public API, `ApiClientOptions`, or supported integration patterns.
 - When adding or bumping a runtime dependency in `pyproject.toml`, update `requirements.txt` to match. The SCA scan installs from it, not from Poetry.
-- Keep code compatible with Python 3.9 (`target-version = "py39"`, CI matrix includes 3.9).
+- Keep code compatible with the Python floor set by `python` under `[tool.poetry.dependencies]` in `pyproject.toml`. Read it there, do not assume a version. `.ruff.toml` `target-version` and the CI matrix lowest version track that floor.
 
 ### Ask First
 
@@ -98,10 +98,11 @@ Before changing a flow (Bearer/DPoP verification, token exchange, MCD, caching),
 - **Domain normalization:** `normalize_domain` rejects `http://`, credentials, paths, queries, and fragments. Route every domain or issuer comparison through it.
 - **MCD resolver input is untrusted:** `request_url`, `request_headers`, and `unverified_iss` in `DomainsResolverContext` are attacker-influenced. Resolver failures raise `DomainsResolverError`, never fall back to accepting the token (see `docs/MultipleCustomDomain.md` "Security Requirements").
 - **Claims:** `iss`, `aud`, `exp`, `iat` are always validated, and `nbf` is validated when present (non-numeric or future values are rejected). `required_claims` adds to them, never replaces them.
-- **Organization policy:** `organization_policy="required"` rejects tokens without an `org_id` claim (`MissingOrganizationError`). `organization_id` is an allowlist valid only with `required` (`OrganizationNotAllowedError`). Both subclass `VerifyAccessTokenError`.
+- **Organization policy:** `organization_policy="required"` rejects tokens without an `org_id` claim (`MissingOrganizationError`). `organization_id` is an allowlist valid only with `required` (`OrganizationNotAllowedError`). Both subclass `VerifyAccessTokenError`. The policy is enforced only at verification. `get_token_on_behalf_of` and `get_access_token_for_connection` verify, and so apply it, only with a `token_store` and no `verified=`. Otherwise they exchange the token unchecked, so integrators call `verify_access_token` first (`docs/OrganizationPolicy.md` "Token Exchange").
+- **Unverified JWT values are attacker-controlled:** type-check every header and payload value before use (header `alg` must be a `str`, DPoP `htm` a `str`, `iat` a finite number). `get_unverified_header` / `get_unverified_payload` raise `ValueError` for malformed, non-object, or deeply nested segments. Wrap it in the flow's typed error.
 - **DPoP:** proofs must carry `iat`, `ath`, `htm`, `htu`, `jti`. `htu` is compared via `normalize_url_for_htu`, `ath` must match the access token hash, and `cnf.jkt` must match the proof key thumbprint. `dpop_required=True` rejects Bearer. `jti` is checked for presence and type only. There is no replay store, so replay is bounded only by the `dpop_iat_offset` / `dpop_iat_leeway` window.
 - **Token exchange:** `RESERVED_PARAMS` blocks overriding OAuth parameters via `extra`, and `MAX_ARRAY_VALUES_PER_KEY` caps array values. Do not weaken either.
-- **Token store caching:** off unless `token_store` is set. With a store, `get_token_on_behalf_of` and `get_access_token_for_connection` verify the token first (unless `verified=` is passed), then key the cache from the verified claims. `AbstractTokenStore` supplies `encrypt` / `decrypt` JWE helpers (HKDF-SHA256, `dir`, `A256CBC-HS512`) and a 32-character minimum secret, but the SDK never calls them. A store must encrypt in its own `get` / `set`, otherwise tokens are stored in plaintext. A cached token is reused only with more than 30 seconds left (`EXPIRY_BUFFER_SECONDS`), a store read failure is a cache miss, and a write failure is logged while the fresh token is still returned. Store exceptions are logged with their message, so a store must keep token values out of exception text. Keys are per flow: OBO folds in issuer, incoming client, exchange tenant and client, audience, `org_id`, session and scopes. M2M uses tenant, client, audience and scopes. Token Vault uses tenant, client, `sub`, connection and `login_hint`.
+- **Token store caching:** off unless `token_store` is set. With a store, `get_token_on_behalf_of` and `get_access_token_for_connection` verify the token first (unless `verified=` is passed), then key the cache from the verified claims. `AbstractTokenStore` supplies `encrypt` / `decrypt` JWE helpers (HKDF-SHA256, `dir`, `A256CBC-HS512`) and a 32-character minimum secret, but the SDK never calls them. A store must encrypt in its own `get` / `set`, otherwise tokens are stored in plaintext. A cached token is reused only with more than 30 seconds left (`EXPIRY_BUFFER_SECONDS`), a store read failure is a cache miss, and a write failure is logged while the fresh token is still returned. Store exceptions are logged with their message, so a store must keep token values out of exception text. Keys are per flow: OBO is the caller's `sub` in plain text, then a hash of issuer, incoming client, exchange tenant and client, audience, `org_id`, session and scopes, so a store reader can see which callers have entries (index keys and the `token_key` in index members have the same form). M2M hashes tenant, client, audience and scopes. Token Vault hashes tenant, client, `sub`, connection and `login_hint`.
 - **`verified=` is a trust boundary:** a supplied `VerifiedToken` is not re-verified. Only its `access_token` is compared to the token being exchanged, and its claims then build the cache key. Pass only claims returned by `verify_access_token`.
 - **Errors:** `_prepare_error` builds `WWW-Authenticate` headers and leaves them empty for status 500 and above (`AuthServerUnavailableError`, 503, is the one that reaches it via `verify_request`). Error messages reach HTTP responses, so keep them generic and free of token contents.
 - **Anonymous callers:** tokens with `sub` starting `anon@` verify like any token. Authorization is the integrator's call, the SDK must not silently accept or reject them.
@@ -122,7 +123,7 @@ pytest + pytest-asyncio + pytest-httpx, in `tests/`. The default `poetry run pyt
 
 ## Code Style
 
-CI-enforced via `.ruff.toml`: rule sets `E, W, F, I, B, C4, UP, S, PLC0415` (imports at module top level), isort import order, py39 target, `S101`/`S105`/`S106` allowed only under `tests/`. New non-secret string constants in `src/` use `# noqa: S105` with a reason (existing sites predate this and omit it). See [references/code-style.md](references/code-style.md) for naming, error patterns, and examples. Read it before adding a class, method, or error type.
+CI-enforced via `.ruff.toml`: rule sets `E, W, F, I, B, C4, UP, S, PLC0415` (imports at module top level), isort import order, `target-version` matching the `pyproject.toml` Python floor, `S101`/`S105`/`S106` allowed only under `tests/`. `B904` is ignored, so `raise ... from e` is a convention, not lint-enforced. New non-secret string constants in `src/` use `# noqa: S105` with a reason (existing sites predate this and omit it). See [references/code-style.md](references/code-style.md) for naming, error patterns, and examples. Read it before adding a class, method, or error type.
 
 ## Git Workflow
 
@@ -130,7 +131,7 @@ Branches `feat/`, `fix/`, `docs/`, `chore/`, `release/<version>`. Commits use Co
 
 ## Common Pitfalls
 
-The ones that bite most: the Python 3.9 floor (no `X | None`), `ruff format` is not a CI gate, a missing `@pytest.mark.asyncio`, function-level imports (`PLC0415`), and `custom_fetch` covering only discovery/JWKS. See [references/pitfalls.md](references/pitfalls.md). Read it when a command, test, or CI job behaves unexpectedly.
+The ones that bite most: the `pyproject.toml` Python floor (no `X | None` while it is below 3.10), `ruff format` is not a CI gate, a missing `@pytest.mark.asyncio`, function-level imports (`PLC0415`), and `custom_fetch` covering only discovery/JWKS. See [references/pitfalls.md](references/pitfalls.md). Read it when a command, test, or CI job behaves unexpectedly.
 
 ## Docs Update Rules
 

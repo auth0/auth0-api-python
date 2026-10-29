@@ -30,6 +30,7 @@ poetry run pytest tests/test_api_client.py -k dpop  # filter by name
   - `InMemoryTokenStore`, `InMemoryIndexedTokenStore`: test-only stores (never for production), the latter for `scope_matching="non_strict"`
   - `mock_discovery`: registers the discovery response
   - `mock_token_response(...)`, `token_success(...)`, `last_form(...)`, `last_auth_header(...)`: token endpoint mocking and request inspection
+  - `unsigned_jwt(header, payload)`: a JWT-shaped string from any JSON values with a dummy signature, for malformed header and payload tests
   - `assert_api_error(...)`, `assert_http_basic_auth(...)`, `assert_form_post(...)`, `assert_no_requests(...)`: shared assertions. Use `assert_api_error` rather than hand-rolling `.code` / status checks
 - `src/auth0_api_python/token_utils.py` provides `generate_token`, `generate_dpop_proof`, `generate_token_with_cnf`, signed with a synthetic test key. Use these instead of hand-building JWTs.
 - Use the constants `DISCOVERY_URL`, `JWKS_URL`, `TOKEN_ENDPOINT` from `conftest.py` rather than repeating URLs.
