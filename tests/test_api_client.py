@@ -1,5 +1,7 @@
+import asyncio
 import base64
 import json
+import logging
 import time
 
 import httpx
@@ -10,16 +12,33 @@ from conftest import (
     DISCOVERY_URL,
     JWKS_URL,
     TOKEN_ENDPOINT,
+    InMemoryIndexedTokenStore,
+    InMemoryTokenStore,
     assert_api_error,
     assert_form_post,
     assert_no_requests,
     last_form,
     token_success,
+    unsigned_jwt,
 )
 from freezegun import freeze_time
 from pytest_httpx import HTTPXMock
 
-from auth0_api_python import get_current_actor, get_delegation_chain
+from auth0_api_python import (
+    AuthServerUnavailableError,
+    MissingOrganizationError,
+    OrganizationNotAllowedError,
+    get_current_actor,
+    get_delegation_chain,
+)
+from auth0_api_python import __all__ as package_exports
+from auth0_api_python._internal.cache_keys import (
+    index_cache_key,
+    m2m_cache_key,
+    obo_cache_key,
+    session_fingerprint,
+    token_vault_cache_key,
+)
 from auth0_api_python.api_client import MAX_ARRAY_VALUES_PER_KEY, ApiClient
 from auth0_api_python.config import ApiClientOptions
 from auth0_api_python.errors import (
@@ -27,6 +46,7 @@ from auth0_api_python.errors import (
     ConfigurationError,
     DomainsResolverError,
     GetAccessTokenForConnectionError,
+    GetClientCredentialsTokenError,
     GetTokenByExchangeProfileError,
     InvalidAuthSchemeError,
     InvalidDpopProofError,
@@ -34,6 +54,7 @@ from auth0_api_python.errors import (
     MissingRequiredArgumentError,
     VerifyAccessTokenError,
 )
+from auth0_api_python.token_store import VerifiedToken
 from auth0_api_python.token_utils import (
     PRIVATE_EC_JWK,
     PRIVATE_JWK,
@@ -71,8 +92,8 @@ def test_custom_jwt_algorithms():
         audience="my-audience",
         jwt_algorithms=["RS384", "RS512"],
     ))
-
     assert client._jwt_algorithms == ["RS384", "RS512"]
+
     with pytest.raises(ConfigurationError):
         ApiClient(ApiClientOptions(
             domain="example.us.auth0.com",
@@ -454,6 +475,71 @@ async def test_verify_access_token_fail_no_exp(httpx_mock: HTTPXMock):
     assert "exp" in error_str or "missing" in error_str
 
 
+async def _verify_with_nbf(httpx_mock: HTTPXMock, nbf):
+    httpx_mock.add_response(method="GET", url=DISCOVERY_URL, json={"issuer": "https://auth0.local/", "jwks_uri": JWKS_URL})
+    httpx_mock.add_response(method="GET", url=JWKS_URL, json={"keys": [PUBLIC_RSA_JWK]})
+    claims = {} if nbf is None else {"nbf": nbf}
+    access_token = await generate_token(
+        domain="auth0.local", user_id="user_123", audience="my-audience", claims=claims
+    )
+    api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
+    return await api_client.verify_access_token(access_token=access_token)
+
+
+@pytest.mark.asyncio
+async def test_verify_access_token_fail_nbf_in_future(httpx_mock: HTTPXMock):
+    """A token whose 'nbf' is still in the future is rejected."""
+    with pytest.raises(VerifyAccessTokenError) as err:
+        await _verify_with_nbf(httpx_mock, int(time.time()) + 3600)
+
+    assert "not yet valid" in str(err.value)
+
+
+@pytest.mark.asyncio
+async def test_verify_access_token_succeeds_with_past_nbf(httpx_mock: HTTPXMock):
+    """A token whose 'nbf' has passed is accepted."""
+    claims = await _verify_with_nbf(httpx_mock, int(time.time()) - 60)
+
+    assert claims["sub"] == "user_123"
+
+
+@pytest.mark.asyncio
+async def test_verify_access_token_succeeds_without_nbf(httpx_mock: HTTPXMock):
+    """'nbf' is optional, so a token without it is accepted."""
+    claims = await _verify_with_nbf(httpx_mock, None)
+
+    assert "nbf" not in claims
+
+
+@pytest.mark.asyncio
+@freeze_time("2025-01-01T00:00:00Z")
+async def test_verify_access_token_succeeds_when_nbf_equals_now(httpx_mock: HTTPXMock):
+    """A token whose 'nbf' is exactly the current time is accepted."""
+    claims = await _verify_with_nbf(httpx_mock, int(time.time()))
+
+    assert claims["sub"] == "user_123"
+
+
+@pytest.mark.asyncio
+@freeze_time("2025-01-01T00:00:00Z")
+async def test_verify_access_token_fail_fractional_nbf_in_future(httpx_mock: HTTPXMock):
+    """A fractional 'nbf' half a second ahead is a valid number and is rejected as not yet valid."""
+    with pytest.raises(VerifyAccessTokenError) as err:
+        await _verify_with_nbf(httpx_mock, time.time() + 0.5)
+
+    assert "not yet valid" in str(err.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_nbf", ["soon", True, [1]])
+async def test_verify_access_token_fail_non_numeric_nbf(httpx_mock: HTTPXMock, bad_nbf):
+    """A non-numeric 'nbf' is rejected as an invalid token."""
+    with pytest.raises(VerifyAccessTokenError) as err:
+        await _verify_with_nbf(httpx_mock, bad_nbf)
+
+    assert "nbf" in str(err.value)
+
+
 @pytest.mark.asyncio
 async def test_verify_access_token_fail_no_audience_config():
     """
@@ -485,6 +571,493 @@ async def test_verify_access_token_fail_malformed_token():
         await api_client.verify_access_token("header.pay!load.signature")
     assert "failed to parse token" in str(e.value).lower()
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header,payload,message", [
+    ([1], {"iss": "https://auth0.local/"}, "failed to parse token header"),
+    ("text", {"iss": "https://auth0.local/"}, "failed to parse token header"),
+    (5, {"iss": "https://auth0.local/"}, "failed to parse token header"),
+    (None, {"iss": "https://auth0.local/"}, "failed to parse token header"),
+    (True, {"iss": "https://auth0.local/"}, "failed to parse token header"),
+    ({"alg": 5}, {"iss": "https://auth0.local/"}, "'alg'"),
+    ({"alg": None}, {"iss": "https://auth0.local/"}, "'alg'"),
+    ({"alg": ["RS256"]}, {"iss": "https://auth0.local/"}, "'alg'"),
+    ({"alg": {"a": 1}}, {"iss": "https://auth0.local/"}, "'alg'"),
+    ({"alg": True}, {"iss": "https://auth0.local/"}, "'alg'"),
+    ({"alg": "RS256"}, [1], "failed to parse token payload"),
+    ({"alg": "RS256"}, "text", "failed to parse token payload"),
+    ({"alg": "RS256"}, 5, "failed to parse token payload"),
+    ({"alg": "RS256"}, None, "failed to parse token payload"),
+    ({"alg": "RS256"}, True, "failed to parse token payload"),
+])
+async def test_verify_access_token_fail_non_object_segments(header, payload, message):
+    """Test that a header or payload that is not an object fails as an invalid token."""
+
+    api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
+
+    with pytest.raises(VerifyAccessTokenError) as e:
+        await api_client.verify_access_token(unsigned_jwt(header, payload))
+    assert message in str(e.value).lower()
+
+
+FETCH_FAILURES = [
+    ("connect_error", True),
+    ("http_500", True),
+    ("http_429", True),
+    ("http_404", False),
+]
+
+
+def _add_fetch_failure(httpx_mock: HTTPXMock, url: str, failure: str):
+    if failure == "connect_error":
+        httpx_mock.add_exception(httpx.ConnectError("boom"), method="GET", url=url)
+    else:
+        httpx_mock.add_response(method="GET", url=url, status_code=int(failure.split("_")[1]))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure,unavailable", FETCH_FAILURES)
+async def test_verify_access_token_discovery_fetch_failure_status(httpx_mock: HTTPXMock, failure, unavailable):
+    """Outage-type discovery failures raise the 503 error, other failures stay a 401 invalid token."""
+    _add_fetch_failure(httpx_mock, DISCOVERY_URL, failure)
+
+    access_token = await generate_token(domain="auth0.local", user_id="user_123", audience="my-audience")
+    api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
+
+    with pytest.raises(VerifyAccessTokenError) as err:
+        await api_client.verify_access_token(access_token)
+
+    assert isinstance(err.value, AuthServerUnavailableError) is unavailable
+    assert err.value.get_status_code() == (503 if unavailable else 401)
+    assert err.value.get_error_code() == ("auth_server_unavailable" if unavailable else "invalid_token")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure,unavailable", FETCH_FAILURES)
+async def test_verify_access_token_jwks_fetch_failure_status(httpx_mock: HTTPXMock, failure, unavailable):
+    """Outage-type JWKS failures raise the 503 error, other failures stay a 401 invalid token."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"issuer": "https://auth0.local/", "jwks_uri": JWKS_URL},
+    )
+    _add_fetch_failure(httpx_mock, JWKS_URL, failure)
+
+    access_token = await generate_token(domain="auth0.local", user_id="user_123", audience="my-audience")
+    api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
+
+    with pytest.raises(VerifyAccessTokenError) as err:
+        await api_client.verify_access_token(access_token)
+
+    assert isinstance(err.value, AuthServerUnavailableError) is unavailable
+    assert err.value.get_status_code() == (503 if unavailable else 401)
+    assert err.value.get_error_code() == ("auth_server_unavailable" if unavailable else "invalid_token")
+
+
+@pytest.mark.asyncio
+async def test_verify_access_token_custom_fetch_failure_is_unavailable():
+    """A custom_fetch that raises is reported as an unavailable auth server."""
+    async def failing_fetch(url, **kwargs):
+        raise ConnectionError("boom")
+
+    access_token = await generate_token(domain="auth0.local", user_id="user_123", audience="my-audience")
+    api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience", custom_fetch=failing_fetch))
+
+    with pytest.raises(AuthServerUnavailableError) as err:
+        await api_client.verify_access_token(access_token)
+
+    assert err.value.get_status_code() == 503
+
+
+@pytest.mark.asyncio
+async def test_verify_access_token_custom_fetch_non_network_error_stays_invalid_token():
+    """A custom_fetch that raises something other than a connection error or timeout is a 401, not an outage."""
+    async def broken_fetch(url, **kwargs):
+        raise ValueError("boom")
+
+    access_token = await generate_token(domain="auth0.local", user_id="user_123", audience="my-audience")
+    api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience", custom_fetch=broken_fetch))
+
+    with pytest.raises(VerifyAccessTokenError) as err:
+        await api_client.verify_access_token(access_token)
+
+    assert not isinstance(err.value, AuthServerUnavailableError)
+    assert err.value.get_status_code() == 401
+
+
+@pytest.mark.asyncio
+async def test_verify_access_token_bad_signature_stays_invalid_token(httpx_mock: HTTPXMock):
+    """A reachable tenant with a token it did not sign still fails as a 401 invalid token."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"issuer": "https://auth0.local/", "jwks_uri": JWKS_URL},
+    )
+    httpx_mock.add_response(method="GET", url=JWKS_URL, json={"keys": [PUBLIC_RSA_JWK]})
+
+    access_token = await generate_token(domain="auth0.local", user_id="user_123", audience="my-audience")
+    header, payload, signature = access_token.split(".")
+    tampered = f"{header}.{payload}.{signature[:-4]}AAAA"
+    api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
+
+    with pytest.raises(VerifyAccessTokenError) as err:
+        await api_client.verify_access_token(tampered)
+
+    assert not isinstance(err.value, AuthServerUnavailableError)
+    assert err.value.get_status_code() == 401
+    assert err.value.get_error_code() == "invalid_token"
+
+
+# ===== Organization Policy: verify_access_token Enforcement =====
+
+@pytest.mark.asyncio
+async def test_organization_policy_missing_org_id_when_required(httpx_mock: HTTPXMock):
+    """Test that a token with no org_id claim is rejected when organization_policy is 'required'."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={
+            "issuer": "https://auth0.local/",
+            "jwks_uri": JWKS_URL
+        }
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={
+            "keys": [
+                {
+                    "kty": "RSA",
+                    "kid": "TEST_KEY",
+                    "n": "whYOFK2Ocbbpb_zVypi9SeKiNUqKQH0zTKN1-6fpCTu6ZalGI82s7XK3tan4dJt90ptUPKD2zvxqTzFNfx4HHHsrYCf2-FMLn1VTJfQazA2BvJqAwcpW1bqRUEty8tS_Yv4hRvWfQPcc2Gc3-_fQOOW57zVy-rNoJc744kb30NjQxdGp03J2S3GLQu7oKtSDDPooQHD38PEMNnITf0pj-KgDPjymkMGoJlO3aKppsjfbt_AH6GGdRghYRLOUwQU-h-ofWHR3lbYiKtXPn5dN24kiHy61e3VAQ9_YAZlwXC_99GGtw_NpghFAuM4P1JDn0DppJldy3PGFC0GfBCZASw",
+                    "e": "AQAB",
+                    "alg": "RS256",
+                    "use": "sig"
+                }
+            ]
+        }
+    )
+
+    access_token = await generate_token(
+        domain="auth0.local",
+        user_id="user_123",
+        audience="my-audience",
+        issuer=None,
+        iat=True,
+        exp=True,
+    )
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        organization_policy="required",
+    ))
+
+    with pytest.raises(MissingOrganizationError) as err:
+        await api_client.verify_access_token(access_token=access_token)
+
+    assert err.value.get_error_code() == "invalid_token"
+    assert err.value.get_status_code() == 401
+
+
+@pytest.mark.asyncio
+async def test_organization_policy_disallowed_org(httpx_mock: HTTPXMock):
+    """Test that a token whose org_id is not in the allowlist is rejected."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={
+            "issuer": "https://auth0.local/",
+            "jwks_uri": JWKS_URL
+        }
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={
+            "keys": [
+                {
+                    "kty": "RSA",
+                    "kid": "TEST_KEY",
+                    "n": "whYOFK2Ocbbpb_zVypi9SeKiNUqKQH0zTKN1-6fpCTu6ZalGI82s7XK3tan4dJt90ptUPKD2zvxqTzFNfx4HHHsrYCf2-FMLn1VTJfQazA2BvJqAwcpW1bqRUEty8tS_Yv4hRvWfQPcc2Gc3-_fQOOW57zVy-rNoJc744kb30NjQxdGp03J2S3GLQu7oKtSDDPooQHD38PEMNnITf0pj-KgDPjymkMGoJlO3aKppsjfbt_AH6GGdRghYRLOUwQU-h-ofWHR3lbYiKtXPn5dN24kiHy61e3VAQ9_YAZlwXC_99GGtw_NpghFAuM4P1JDn0DppJldy3PGFC0GfBCZASw",
+                    "e": "AQAB",
+                    "alg": "RS256",
+                    "use": "sig"
+                }
+            ]
+        }
+    )
+
+    access_token = await generate_token(
+        domain="auth0.local",
+        user_id="user_123",
+        audience="my-audience",
+        issuer=None,
+        iat=True,
+        exp=True,
+        claims={"org_id": "org_untrusted"},
+    )
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        organization_policy="required",
+        organization_id=["org_abc123", "org_def456"],
+    ))
+
+    with pytest.raises(OrganizationNotAllowedError) as err:
+        await api_client.verify_access_token(access_token=access_token)
+
+    assert err.value.get_error_code() == "invalid_token"
+    assert err.value.get_status_code() == 401
+    assert "org_untrusted" not in str(err.value)
+
+
+@pytest.mark.asyncio
+async def test_organization_policy_allowed_org_succeeds(httpx_mock: HTTPXMock):
+    """Test that a token with an allowlisted org_id verifies successfully."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={
+            "issuer": "https://auth0.local/",
+            "jwks_uri": JWKS_URL
+        }
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={
+            "keys": [
+                {
+                    "kty": "RSA",
+                    "kid": "TEST_KEY",
+                    "n": "whYOFK2Ocbbpb_zVypi9SeKiNUqKQH0zTKN1-6fpCTu6ZalGI82s7XK3tan4dJt90ptUPKD2zvxqTzFNfx4HHHsrYCf2-FMLn1VTJfQazA2BvJqAwcpW1bqRUEty8tS_Yv4hRvWfQPcc2Gc3-_fQOOW57zVy-rNoJc744kb30NjQxdGp03J2S3GLQu7oKtSDDPooQHD38PEMNnITf0pj-KgDPjymkMGoJlO3aKppsjfbt_AH6GGdRghYRLOUwQU-h-ofWHR3lbYiKtXPn5dN24kiHy61e3VAQ9_YAZlwXC_99GGtw_NpghFAuM4P1JDn0DppJldy3PGFC0GfBCZASw",
+                    "e": "AQAB",
+                    "alg": "RS256",
+                    "use": "sig"
+                }
+            ]
+        }
+    )
+
+    access_token = await generate_token(
+        domain="auth0.local",
+        user_id="user_123",
+        audience="my-audience",
+        issuer=None,
+        iat=True,
+        exp=True,
+        claims={"org_id": "org_abc123"},
+    )
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        organization_policy="required",
+        organization_id=["org_abc123", "org_def456"],
+    ))
+
+    claims = await api_client.verify_access_token(access_token=access_token)
+
+    assert claims["sub"] == "user_123"
+    assert claims["org_id"] == "org_abc123"
+
+
+@pytest.mark.asyncio
+async def test_organization_policy_default_allow_does_not_require_org_id(httpx_mock: HTTPXMock):
+    """Test that the default 'allow' policy accepts a token with no org_id claim (no behavior change)."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={
+            "issuer": "https://auth0.local/",
+            "jwks_uri": JWKS_URL
+        }
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={
+            "keys": [
+                {
+                    "kty": "RSA",
+                    "kid": "TEST_KEY",
+                    "n": "whYOFK2Ocbbpb_zVypi9SeKiNUqKQH0zTKN1-6fpCTu6ZalGI82s7XK3tan4dJt90ptUPKD2zvxqTzFNfx4HHHsrYCf2-FMLn1VTJfQazA2BvJqAwcpW1bqRUEty8tS_Yv4hRvWfQPcc2Gc3-_fQOOW57zVy-rNoJc744kb30NjQxdGp03J2S3GLQu7oKtSDDPooQHD38PEMNnITf0pj-KgDPjymkMGoJlO3aKppsjfbt_AH6GGdRghYRLOUwQU-h-ofWHR3lbYiKtXPn5dN24kiHy61e3VAQ9_YAZlwXC_99GGtw_NpghFAuM4P1JDn0DppJldy3PGFC0GfBCZASw",
+                    "e": "AQAB",
+                    "alg": "RS256",
+                    "use": "sig"
+                }
+            ]
+        }
+    )
+
+    access_token = await generate_token(
+        domain="auth0.local",
+        user_id="user_123",
+        audience="my-audience",
+        issuer=None,
+        iat=True,
+        exp=True,
+    )
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+    ))
+
+    claims = await api_client.verify_access_token(access_token=access_token)
+
+    assert claims["sub"] == "user_123"
+
+
+@pytest.mark.asyncio
+async def test_organization_policy_single_string_allowlist(httpx_mock: HTTPXMock):
+    """Test that a single string organization_id accepts a matching org_id and rejects others."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"jwks_uri": JWKS_URL, "issuer": "https://auth0.local/"},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={"keys": [PUBLIC_RSA_JWK]},
+    )
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        organization_policy="required",
+        organization_id="org_abc123",
+    ))
+
+    allowed = await generate_token(
+        domain="auth0.local", user_id="user_123", audience="my-audience", claims={"org_id": "org_abc123"},
+    )
+    claims = await api_client.verify_access_token(access_token=allowed)
+    assert claims["org_id"] == "org_abc123"
+
+    other = await generate_token(
+        domain="auth0.local", user_id="user_123", audience="my-audience", claims={"org_id": "org_other"},
+    )
+    with pytest.raises(OrganizationNotAllowedError):
+        await api_client.verify_access_token(access_token=other)
+
+
+@pytest.mark.asyncio
+async def test_organization_policy_required_without_allowlist_accepts_any_org(httpx_mock: HTTPXMock):
+    """Test that 'required' with no allowlist accepts any token that carries an org_id."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"jwks_uri": JWKS_URL, "issuer": "https://auth0.local/"},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={"keys": [PUBLIC_RSA_JWK]},
+    )
+
+    token = await generate_token(
+        domain="auth0.local", user_id="user_123", audience="my-audience", claims={"org_id": "org_any"},
+    )
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local", audience="my-audience", organization_policy="required",
+    ))
+
+    claims = await api_client.verify_access_token(access_token=token)
+
+    assert claims["org_id"] == "org_any"
+
+
+@pytest.mark.asyncio
+async def test_organization_policy_allow_accepts_token_with_org_id(httpx_mock: HTTPXMock):
+    """Test that the default 'allow' policy accepts a token that carries an org_id."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"jwks_uri": JWKS_URL, "issuer": "https://auth0.local/"},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={"keys": [PUBLIC_RSA_JWK]},
+    )
+
+    token = await generate_token(
+        domain="auth0.local", user_id="user_123", audience="my-audience", claims={"org_id": "org_any"},
+    )
+    api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
+
+    claims = await api_client.verify_access_token(access_token=token)
+
+    assert claims["org_id"] == "org_any"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("org_id", [123, ["org_abc123"], "", None])
+async def test_organization_policy_rejects_non_string_org_id(httpx_mock: HTTPXMock, org_id):
+    """Test that an org_id claim that is not a non-empty string is treated as missing."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"jwks_uri": JWKS_URL, "issuer": "https://auth0.local/"},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={"keys": [PUBLIC_RSA_JWK]},
+    )
+
+    token = await generate_token(
+        domain="auth0.local", user_id="user_123", audience="my-audience", claims={"org_id": org_id},
+    )
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        organization_policy="required",
+        organization_id=["org_abc123"],
+    ))
+
+    with pytest.raises(MissingOrganizationError):
+        await api_client.verify_access_token(access_token=token)
+
+
+@pytest.mark.asyncio
+async def test_organization_policy_logs_rejected_org_id(httpx_mock: HTTPXMock, caplog):
+    """Test that the rejected org_id is logged since it is kept out of the error message."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"jwks_uri": JWKS_URL, "issuer": "https://auth0.local/"},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={"keys": [PUBLIC_RSA_JWK]},
+    )
+
+    token = await generate_token(
+        domain="auth0.local", user_id="user_123", audience="my-audience", claims={"org_id": "org_untrusted"},
+    )
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        organization_policy="required",
+        organization_id=["org_abc123"],
+    ))
+
+    with caplog.at_level("WARNING"), pytest.raises(OrganizationNotAllowedError):
+        await api_client.verify_access_token(access_token=token)
+
+    assert "org_untrusted" in caplog.text
+    assert any(record.name == "auth0_api_python.api_client" for record in caplog.records)
+
+
+def test_organization_errors_are_exported_from_package_root():
+    """Test that the organization errors are listed in the package-root exports."""
+    assert {"MissingOrganizationError", "OrganizationNotAllowedError"} <= set(package_exports)
 
 
 # DPOP PROOF VERIFICATION TESTS
@@ -619,6 +1192,59 @@ async def test_verify_dpop_proof_fail_no_http_url():
         )
 
     assert "http_url" in str(err.value).lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proof", [
+    unsigned_jwt([1], {}),
+    unsigned_jwt("text", {}),
+    unsigned_jwt(None, {}),
+    "a.b",
+    "not-a-jwt",
+])
+async def test_verify_dpop_proof_fail_unparseable_header(proof):
+    """
+    Test that a proof whose header cannot be parsed into an object fails as an invalid proof.
+    """
+    api_client = ApiClient(
+        ApiClientOptions(domain="auth0.local", audience="my-audience")
+    )
+
+    with pytest.raises(InvalidDpopProofError):
+        await api_client.verify_dpop_proof(
+            access_token="test_token",
+            proof=proof,
+            http_method="GET",
+            http_url="https://api.example.com/resource"
+        )
+
+
+@pytest.mark.asyncio
+async def test_verify_dpop_proof_fail_incomplete_jwk():
+    """
+    Test that a proof whose jwk has no coordinates fails as an invalid proof.
+    """
+    access_token = "test_token"
+    proof = await generate_dpop_proof(
+        access_token=access_token,
+        http_method="GET",
+        http_url="https://api.example.com/resource",
+        header_overrides={"jwk": {"kty": "EC", "crv": "P-256"}},
+    )
+
+    api_client = ApiClient(
+        ApiClientOptions(domain="auth0.local", audience="my-audience")
+    )
+
+    with pytest.raises(InvalidDpopProofError) as err:
+        await api_client.verify_dpop_proof(
+            access_token=access_token,
+            proof=proof,
+            http_method="GET",
+            http_url="https://api.example.com/resource"
+        )
+
+    assert "jwk" in str(err.value).lower()
 
 
 # --- Claim Validation Tests ---
@@ -882,6 +1508,61 @@ async def test_verify_dpop_proof_fail_invalid_iat_in_future():
     assert "iat is from the future" in str(err.value).lower()
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad_iat", [float("nan"), float("inf"), float("-inf")])
+async def test_verify_dpop_proof_fail_non_finite_iat(bad_iat):
+    """
+    Test that a DPoP proof whose 'iat' is NaN or infinite fails verification.
+    """
+    access_token = "test_token"
+    dpop_proof = await generate_dpop_proof(
+        access_token=access_token,
+        http_method="GET",
+        http_url="https://api.example.com/resource",
+        iat_time=bad_iat
+    )
+
+    api_client = ApiClient(
+        ApiClientOptions(domain="auth0.local", audience="my-audience")
+    )
+
+    with pytest.raises(InvalidDpopProofError) as err:
+        await api_client.verify_dpop_proof(
+            access_token=access_token,
+            proof=dpop_proof,
+            http_method="GET",
+            http_url="https://api.example.com/resource"
+        )
+
+    assert "invalid iat" in str(err.value).lower()
+
+@pytest.mark.asyncio
+async def test_verify_dpop_proof_fail_iat_too_large_for_float():
+    """
+    Test that a DPoP proof whose 'iat' is an integer too large to convert to a float fails verification.
+    """
+    access_token = "test_token"
+    dpop_proof = await generate_dpop_proof(
+        access_token=access_token,
+        http_method="GET",
+        http_url="https://api.example.com/resource",
+        iat_time=10**400
+    )
+
+    api_client = ApiClient(
+        ApiClientOptions(domain="auth0.local", audience="my-audience")
+    )
+
+    with pytest.raises(InvalidDpopProofError) as err:
+        await api_client.verify_dpop_proof(
+            access_token=access_token,
+            proof=dpop_proof,
+            http_method="GET",
+            http_url="https://api.example.com/resource"
+        )
+
+    assert "from the future" in str(err.value).lower()
+
+@pytest.mark.asyncio
 async def test_verify_dpop_proof_iat_exact_boundary_conditions():
     """
     Test IAT timing validation at exact boundary conditions.
@@ -1052,6 +1733,34 @@ async def test_verify_dpop_proof_with_missing_jti():
             http_url="https://api.example.com/resource"
         )
     assert "missing required claim: jti" in str(err.value).lower()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_htm", [5, ["GET"], None, True])
+async def test_verify_dpop_proof_fail_non_string_htm(bad_htm):
+    """
+    Test that a DPoP proof whose 'htm' claim is not a string fails verification.
+    """
+    access_token = "test_token"
+    dpop_proof = await generate_dpop_proof(
+        access_token=access_token,
+        http_method=bad_htm,
+        http_url="https://api.example.com/resource",
+    )
+
+    api_client = ApiClient(
+        ApiClientOptions(domain="auth0.local", audience="my-audience")
+    )
+
+    with pytest.raises(InvalidDpopProofError) as err:
+        await api_client.verify_dpop_proof(
+            access_token=access_token,
+            proof=dpop_proof,
+            http_method="GET",
+            http_url="https://api.example.com/resource"
+        )
+
+    assert "htm" in str(err.value).lower()
+
 
 @pytest.mark.asyncio
 async def test_verify_dpop_proof_fail_htm_mismatch():
@@ -1438,6 +2147,59 @@ async def test_verify_request_dpop_scheme_success(httpx_mock: HTTPXMock):
     assert result["iss"] == "https://auth0.local/"
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("proof", [unsigned_jwt([1], {}), unsigned_jwt(None, {})])
+async def test_verify_request_dpop_fail_non_object_proof_header(proof):
+    """
+    Test that a DPoP proof whose header is not an object is rejected as an invalid proof.
+    """
+    api_client = ApiClient(
+        ApiClientOptions(domain="auth0.local", audience="my-audience")
+    )
+
+    with pytest.raises(InvalidDpopProofError):
+        await api_client.verify_request(
+            headers={"authorization": "DPoP some-token", "dpop": proof},
+            http_method="GET",
+            http_url="https://api.example.com/resource"
+        )
+
+
+@pytest.mark.asyncio
+async def test_verify_request_dpop_fail_non_string_htm(httpx_mock: HTTPXMock):
+    """
+    Test that a DPoP proof with a non-string 'htm' claim is rejected through verify_request.
+    """
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"jwks_uri": JWKS_URL, "issuer": "https://auth0.local/"},
+    )
+    httpx_mock.add_response(method="GET", url=JWKS_URL, json={"keys": [PUBLIC_RSA_JWK]})
+
+    access_token = await generate_token_with_cnf(
+        domain="auth0.local",
+        user_id="test_user",
+        audience="my-audience",
+    )
+    dpop_proof = await generate_dpop_proof(
+        access_token=access_token,
+        http_method=5,
+        http_url="https://api.example.com/resource"
+    )
+
+    api_client = ApiClient(
+        ApiClientOptions(domain="auth0.local", audience="my-audience")
+    )
+
+    with pytest.raises(InvalidDpopProofError):
+        await api_client.verify_request(
+            headers={"authorization": f"DPoP {access_token}", "dpop": dpop_proof},
+            http_method="GET",
+            http_url="https://api.example.com/resource"
+        )
+
+
+@pytest.mark.asyncio
 async def test_verify_request_header_normalization(httpx_mock: HTTPXMock):
     """
     Test that header key normalization works (uppercase Authorization header).
@@ -1636,6 +2398,84 @@ async def test_verify_request_fail_dpop_disabled():
     assert "invalid_request" in str(err.value.get_error_code()).lower()
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fail_at", ["discovery", "jwks"])
+async def test_verify_request_bearer_fetch_failure_is_503_without_challenge(httpx_mock: HTTPXMock, fail_at):
+    """An unreachable discovery or JWKS endpoint gives a 503 with no WWW-Authenticate challenge."""
+    if fail_at == "discovery":
+        httpx_mock.add_exception(httpx.ConnectError("boom"), method="GET", url=DISCOVERY_URL)
+    else:
+        httpx_mock.add_response(
+            method="GET",
+            url=DISCOVERY_URL,
+            json={"issuer": "https://auth0.local/", "jwks_uri": JWKS_URL},
+        )
+        httpx_mock.add_exception(httpx.ConnectError("boom"), method="GET", url=JWKS_URL)
+
+    access_token = await generate_token(domain="auth0.local", user_id="test_user", audience="my-audience")
+    api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
+
+    with pytest.raises(AuthServerUnavailableError) as err:
+        await api_client.verify_request(
+            headers={"authorization": f"Bearer {access_token}"},
+            http_method="GET",
+            http_url="https://api.example.com/resource"
+        )
+
+    assert err.value.get_status_code() == 503
+    assert err.value.get_error_code() == "auth_server_unavailable"
+    assert err.value.get_headers() == {}
+
+
+@pytest.mark.asyncio
+async def test_verify_request_dpop_fetch_failure_is_503_without_challenge(httpx_mock: HTTPXMock):
+    """The DPoP path returns the same 503 with no challenge, even with DPoP enabled."""
+    httpx_mock.add_exception(httpx.ConnectError("boom"), method="GET", url=DISCOVERY_URL)
+
+    access_token = await generate_token_with_cnf(domain="auth0.local", user_id="test_user", audience="my-audience")
+    dpop_proof = await generate_dpop_proof(
+        access_token=access_token,
+        http_method="GET",
+        http_url="https://api.example.com/resource"
+    )
+    api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
+
+    with pytest.raises(AuthServerUnavailableError) as err:
+        await api_client.verify_request(
+            headers={"authorization": f"DPoP {access_token}", "dpop": dpop_proof},
+            http_method="GET",
+            http_url="https://api.example.com/resource"
+        )
+
+    assert err.value.get_status_code() == 503
+    assert err.value.get_headers() == {}
+
+
+@pytest.mark.asyncio
+async def test_verify_request_bearer_bad_signature_keeps_invalid_token_challenge(httpx_mock: HTTPXMock):
+    """A reachable tenant with a bad token still returns a 401 with an invalid_token challenge."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"issuer": "https://auth0.local/", "jwks_uri": JWKS_URL},
+    )
+    httpx_mock.add_response(method="GET", url=JWKS_URL, json={"keys": [PUBLIC_RSA_JWK]})
+
+    access_token = await generate_token(domain="auth0.local", user_id="test_user", audience="my-audience")
+    header, payload, signature = access_token.split(".")
+    tampered = f"{header}.{payload}.{signature[:-4]}AAAA"
+    api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
+
+    with pytest.raises(VerifyAccessTokenError) as err:
+        await api_client.verify_request(
+            headers={"authorization": f"Bearer {tampered}"},
+            http_method="GET",
+            http_url="https://api.example.com/resource"
+        )
+
+    assert err.value.get_status_code() == 401
+    assert 'error="invalid_token"' in err.value.get_headers()["WWW-Authenticate"]
+
+@pytest.mark.asyncio
 async def test_verify_request_fail_missing_authorization_header():
     """
     Test that requests without Authorization header are rejected.
@@ -1777,6 +2617,43 @@ async def test_verify_request_dpop_required_mismatch(dpop_required, auth_header,
 
     assert err.value.get_status_code() == 400
     assert "invalid_request" in str(err.value.get_error_code()).lower()
+
+
+@pytest.mark.asyncio
+async def test_organization_policy_verify_request_header_uses_invalid_token_and_static_text(httpx_mock: HTTPXMock):
+    """Test that org failures surface as invalid_token in WWW-Authenticate without echoing the org_id."""
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"jwks_uri": JWKS_URL, "issuer": "https://auth0.local/"},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=JWKS_URL,
+        json={"keys": [PUBLIC_RSA_JWK]},
+    )
+
+    token = await generate_token(
+        domain="auth0.local", user_id="user_123", audience="my-audience", claims={"org_id": "org_untrusted"},
+    )
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        organization_policy="required",
+        organization_id=["org_abc123"],
+    ))
+
+    with pytest.raises(OrganizationNotAllowedError) as err:
+        await api_client.verify_request(
+            headers={"authorization": f"Bearer {token}"},
+            http_method="GET",
+            http_url="https://api.example.com/resource",
+        )
+
+    header = err.value.get_headers()["WWW-Authenticate"]
+    assert 'error="invalid_token"' in header
+    assert "org_untrusted" not in header
+
 
 @pytest.mark.asyncio
 async def test_get_access_token_for_connection_success(httpx_mock: HTTPXMock):
@@ -2087,6 +2964,31 @@ async def test_get_access_token_for_connection_expires_in_not_integer(httpx_mock
         })
     assert err.value.code == "invalid_response"
     assert "expires_in" in str(err.value).lower()
+    assert err.value.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_expires_in_negative(httpx_mock: HTTPXMock):
+    httpx_mock.add_response(method="GET", url=DISCOVERY_URL, json={"token_endpoint": TOKEN_ENDPOINT})
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        status_code=200,
+        json={"access_token": "abc123", "expires_in": -1}
+    )
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+    ))
+    with pytest.raises(ApiError) as err:
+        await api_client.get_access_token_for_connection({
+            "connection": "test-conn",
+            "access_token": "user-token"
+        })
+    assert err.value.code == "invalid_response"
+    assert "negative" in str(err.value).lower()
     assert err.value.status_code == 502
 
 
@@ -2904,7 +3806,7 @@ async def test_get_token_on_behalf_of_missing_audience(api_client_confidential):
 
 
 @pytest.mark.asyncio
-async def test_get_token_on_behalf_of_success(mock_discovery, api_client_confidential, httpx_mock):
+async def test_get_token_on_behalf_of_success(mock_discovery, api_client_confidential_no_store, httpx_mock):
     """Test successful OBO exchange with fixed access-token types."""
     httpx_mock.add_response(
         method="POST",
@@ -2918,7 +3820,7 @@ async def test_get_token_on_behalf_of_success(mock_discovery, api_client_confide
         }
     )
 
-    result = await api_client_confidential.get_token_on_behalf_of(
+    result = await api_client_confidential_no_store.get_token_on_behalf_of(
         access_token="incoming-access-token",
         audience="https://api.backend.com",
         scope="read:data write:data"
@@ -2948,12 +3850,12 @@ async def test_get_token_on_behalf_of_success(mock_discovery, api_client_confide
 
 @pytest.mark.asyncio
 async def test_get_token_on_behalf_of_preserves_inferred_expires_at(
-    api_client_confidential,
+    api_client_confidential_no_store,
     monkeypatch,
 ):
     """Test that OBO reuses the expires_at inferred by the generic exchange path."""
 
-    async def fake_exchange_profile(
+    async def stub_exchange_profile(
         *,
         subject_token,
         subject_token_type,
@@ -2978,12 +3880,12 @@ async def test_get_token_on_behalf_of_preserves_inferred_expires_at(
         }
 
     monkeypatch.setattr(
-        api_client_confidential,
+        api_client_confidential_no_store,
         "get_token_by_exchange_profile",
-        fake_exchange_profile,
+        stub_exchange_profile,
     )
 
-    result = await api_client_confidential.get_token_on_behalf_of(
+    result = await api_client_confidential_no_store.get_token_on_behalf_of(
         access_token="incoming-access-token",
         audience="https://api.backend.com",
     )
@@ -2996,7 +3898,7 @@ async def test_get_token_on_behalf_of_preserves_inferred_expires_at(
 
 
 @pytest.mark.asyncio
-async def test_get_token_on_behalf_of_without_scope(mock_discovery, api_client_confidential, httpx_mock):
+async def test_get_token_on_behalf_of_without_scope(mock_discovery, api_client_confidential_no_store, httpx_mock):
     """Test OBO exchange omits scope when not provided."""
     httpx_mock.add_response(
         method="POST",
@@ -3008,7 +3910,7 @@ async def test_get_token_on_behalf_of_without_scope(mock_discovery, api_client_c
         )
     )
 
-    result = await api_client_confidential.get_token_on_behalf_of(
+    result = await api_client_confidential_no_store.get_token_on_behalf_of(
         access_token="incoming-access-token",
         audience="https://api.backend.com",
     )
@@ -3019,7 +3921,7 @@ async def test_get_token_on_behalf_of_without_scope(mock_discovery, api_client_c
 
 @pytest.mark.asyncio
 async def test_get_token_on_behalf_of_does_not_expose_id_or_refresh_token(
-    mock_discovery, api_client_confidential, httpx_mock
+    mock_discovery, api_client_confidential_no_store, httpx_mock
 ):
     """Test OBO result only exposes access-token-oriented fields."""
     httpx_mock.add_response(
@@ -3035,7 +3937,7 @@ async def test_get_token_on_behalf_of_does_not_expose_id_or_refresh_token(
         }
     )
 
-    result = await api_client_confidential.get_token_on_behalf_of(
+    result = await api_client_confidential_no_store.get_token_on_behalf_of(
         access_token="incoming-access-token",
         audience="https://api.backend.com",
     )
@@ -3046,7 +3948,7 @@ async def test_get_token_on_behalf_of_does_not_expose_id_or_refresh_token(
 
 
 @pytest.mark.asyncio
-async def test_get_token_on_behalf_of_api_error(mock_discovery, api_client_confidential, httpx_mock):
+async def test_get_token_on_behalf_of_api_error(mock_discovery, api_client_confidential_no_store, httpx_mock):
     """Test that OBO reuses the existing exchange error semantics."""
     httpx_mock.add_response(
         method="POST",
@@ -3059,7 +3961,7 @@ async def test_get_token_on_behalf_of_api_error(mock_discovery, api_client_confi
     )
 
     with pytest.raises(ApiError) as err:
-        await api_client_confidential.get_token_on_behalf_of(
+        await api_client_confidential_no_store.get_token_on_behalf_of(
             access_token="incoming-access-token",
             audience="https://api.backend.com",
         )
@@ -3076,6 +3978,2148 @@ async def test_get_token_on_behalf_of_empty_access_token(api_client_confidential
             access_token="",
             audience="https://api.backend.com",
         )
+
+
+# ===== Client Credentials (M2M) Tests =====
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_success(mock_discovery, api_client_confidential, httpx_mock):
+    """Test successful M2M exchange: correct grant_type, HTTP Basic auth, and result shape."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json={
+            "access_token": "m2m-access-token",
+            "token_type": "Bearer",
+            "expires_in": 86400,
+        }
+    )
+
+    result = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+
+    assert result["access_token"] == "m2m-access-token"
+    assert result["expires_in"] == 86400
+    assert isinstance(result["expires_at"], int)
+    assert result["token_type"] == "Bearer"
+
+    assert_form_post(
+        httpx_mock,
+        expect_fields={
+            "grant_type": ["client_credentials"],
+            "audience": ["https://billing-api.example.com"],
+            "scope": ["admin:billing"],
+        },
+        forbid_fields=["client_id", "client_secret"],
+        expect_basic_auth=("cid", "csecret"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_missing_credentials():
+    """Test that M2M raises GetClientCredentialsTokenError when credentials are not configured."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+    ))
+
+    with pytest.raises(GetClientCredentialsTokenError) as err:
+        await api_client.get_client_credentials_token(audience="https://billing-api.example.com")
+
+    assert "client credentials are required" in str(err.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_missing_audience(api_client_confidential):
+    """Test that M2M raises MissingRequiredArgumentError when audience is not provided."""
+    with pytest.raises(MissingRequiredArgumentError):
+        await api_client_confidential.get_client_credentials_token(audience="")
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_api_error(mock_discovery, api_client_confidential, httpx_mock):
+    """Test that a token endpoint error surfaces as ApiError (functional requirements scenario 8)."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        status_code=400,
+        json={
+            "error": "access_denied",
+            "error_description": "Client not authorized for this audience",
+        }
+    )
+
+    with pytest.raises(ApiError) as err:
+        await api_client_confidential.get_client_credentials_token(
+            audience="https://billing-api.example.com",
+        )
+
+    assert err.value.code == "access_denied"
+    assert err.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_no_scope_in_response(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that a response without a scope field is handled without error."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json={
+            "access_token": "m2m-access-token",
+            "token_type": "Bearer",
+            "expires_in": 86400,
+            # no "scope" field, matching the documented Auth0 M2M response shape
+        }
+    )
+
+    result = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+    )
+
+    assert result["access_token"] == "m2m-access-token"
+    assert "scope" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response_kwargs",
+    [
+        {"content": b"not json"},
+        {"json": ["not", "an", "object"]},
+        {"json": {"expires_in": 3600}},
+        {"json": {"access_token": "", "expires_in": 3600}},
+        {"json": {"access_token": "t"}},
+        {"json": {"access_token": "t", "expires_in": "soon"}},
+        {"json": {"access_token": "t", "expires_in": -1}},
+    ],
+)
+async def test_get_client_credentials_token_malformed_response(
+    mock_discovery, api_client_confidential, httpx_mock, response_kwargs
+):
+    """A malformed 200 response surfaces as ApiError instead of a raw ValueError or KeyError."""
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, **response_kwargs)
+
+    with pytest.raises(ApiError) as err:
+        await api_client_confidential.get_client_credentials_token(
+            audience="https://billing-api.example.com",
+        )
+
+    assert err.value.code == "invalid_response"
+    assert err.value.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_missing_token_endpoint(httpx_mock, api_client_confidential):
+    """Test that discovery metadata without a token_endpoint raises GetClientCredentialsTokenError."""
+    httpx_mock.add_response(method="GET", url=DISCOVERY_URL, json={})
+
+    with pytest.raises(GetClientCredentialsTokenError) as err:
+        await api_client_confidential.get_client_credentials_token(
+            audience="https://billing-api.example.com",
+        )
+
+    assert "token endpoint missing" in str(err.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_without_token_store_never_caches(
+    mock_discovery, api_client_confidential_no_store, httpx_mock
+):
+    """Without a token_store every call performs its own exchange."""
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="first"))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="second"))
+
+    r1 = await api_client_confidential_no_store.get_client_credentials_token(
+        audience="https://billing-api.example.com", scope="admin:billing")
+    r2 = await api_client_confidential_no_store.get_client_credentials_token(
+        audience="https://billing-api.example.com", scope="admin:billing")
+
+    assert r1["access_token"] == "first"
+    assert r2["access_token"] == "second"
+    assert len([r for r in httpx_mock.get_requests() if r.method == "POST"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_timeout_error(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that a token endpoint timeout surfaces as ApiError."""
+    httpx_mock.add_exception(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        exception=httpx.TimeoutException("Request timed out")
+    )
+
+    with pytest.raises(ApiError) as err:
+        await api_client_confidential.get_client_credentials_token(
+            audience="https://billing-api.example.com",
+        )
+
+    assert err.value.code == "timeout_error"
+    assert "timed out" in str(err.value)
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_network_error(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that a token endpoint network failure surfaces as ApiError."""
+    httpx_mock.add_exception(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        exception=httpx.RequestError("Network unreachable", request=httpx.Request("POST", TOKEN_ENDPOINT))
+    )
+
+    with pytest.raises(ApiError) as err:
+        await api_client_confidential.get_client_credentials_token(
+            audience="https://billing-api.example.com",
+        )
+
+    assert err.value.code == "network_error"
+    assert "network error" in str(err.value).lower()
+
+
+# ===== Token Storage Tests =====
+
+# ----- OBO -----
+
+# The confidential fixture's verified identity: issuer, exchange tenant, and exchange client.
+CONFIDENTIAL_ISS = "https://auth0.local/"
+CONFIDENTIAL_TENANT = "auth0.local"
+CONFIDENTIAL_CID = "cid"
+
+
+def make_access_token(sub: str = "auth0|user1", *, org_id: str = None) -> str:
+    """Build a minimal stub JWT-shaped token carrying the given sub and optional org_id."""
+    claims = {"sub": sub}
+    if org_id is not None:
+        claims["org_id"] = org_id
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
+    return f"hdr.{payload}.sig"
+
+
+def verified_for(access_token, sub="auth0|user1", *, org_id=None, iss=CONFIDENTIAL_ISS):
+    """Build the VerifiedToken an MCP server would pass, so the client skips its own verify."""
+    claims = {"sub": sub, "iss": iss}
+    if org_id is not None:
+        claims["org_id"] = org_id
+    return VerifiedToken(access_token=access_token, claims=claims)
+
+
+def strict_key(access_token, *, audience, scopes, sub="auth0|user1", org_id=None, iss=CONFIDENTIAL_ISS):
+    """The strict-layout token key OboCache computes for the confidential fixture's identity."""
+    return obo_cache_key(
+        layout="strict", sub=sub, issuer=iss, incoming_client_id="",
+        exchange_tenant=CONFIDENTIAL_TENANT, exchange_client_id=CONFIDENTIAL_CID,
+        audience=audience, org_id=org_id, scopes=scopes,
+        session_key=session_fingerprint(access_token),
+    )
+
+
+def index_key(access_token, *, audience, sub="auth0|user1", org_id=None, iss=CONFIDENTIAL_ISS):
+    """The index key OboCache computes for the confidential fixture's identity."""
+    return index_cache_key(
+        sub=sub, issuer=iss, incoming_client_id="",
+        exchange_tenant=CONFIDENTIAL_TENANT, exchange_client_id=CONFIDENTIAL_CID,
+        audience=audience, org_id=org_id, session_key=session_fingerprint(access_token),
+    )
+
+
+def index_token_key(access_token, *, audience, scopes, sub="auth0|user1", org_id=None, iss=CONFIDENTIAL_ISS):
+    """The index-layout token key OboCache computes for the confidential fixture's identity."""
+    return obo_cache_key(
+        layout="index", sub=sub, issuer=iss, incoming_client_id="",
+        exchange_tenant=CONFIDENTIAL_TENANT, exchange_client_id=CONFIDENTIAL_CID,
+        audience=audience, org_id=org_id, scopes=scopes,
+        session_key=session_fingerprint(access_token),
+    )
+
+
+class RaisingGetTokenStore(InMemoryTokenStore):
+    """Token store whose get() always raises, to verify read failures fall back to a fresh exchange."""
+
+    async def get(self, key):
+        raise RuntimeError("store unavailable")
+
+
+class RaisingSetTokenStore(InMemoryTokenStore):
+    """Token store whose set() always raises, to verify write failures don't fail the caller."""
+
+    async def set(self, key, value):
+        raise RuntimeError("store unavailable")
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_no_token_store_always_fresh_exchange(
+    mock_discovery, httpx_mock
+):
+    """Test that no token_store means every call performs a fresh exchange."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+    ))
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-1"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-2"),
+    )
+
+    payload = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user1"}).encode()).rstrip(b"=").decode()
+    token = f"hdr.{payload}.sig"
+    result1 = await api_client.get_token_on_behalf_of(access_token=token, audience="https://api.backend.com")
+    result2 = await api_client.get_token_on_behalf_of(access_token=token, audience="https://api.backend.com")
+
+    assert result1["access_token"] == "obo-access-token-1"
+    assert result2["access_token"] == "obo-access-token-2"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_with_token_store_cache_miss_then_hit(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that a second call for the same token/audience/scope is served from cache."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    result1 = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token,
+        audience="https://api.backend.com",
+        scope="read:data",
+        verified=verified,
+    )
+    result2 = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token,
+        audience="https://api.backend.com",
+        scope="read:data",
+        verified=verified,
+    )
+
+    assert result1["access_token"] == "obo-access-token"
+    assert result2["access_token"] == "obo-access-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_unverifiable_raw_token_raises(
+    api_client_confidential, httpx_mock
+):
+    """With a store and no verified context, an unverifiable raw token raises before any exchange."""
+    with pytest.raises(VerifyAccessTokenError):
+        await api_client_confidential.get_token_on_behalf_of(
+            access_token="not-a-jwt",
+            audience="https://api.backend.com",
+        )
+
+    assert not [r for r in httpx_mock.get_requests() if r.method == "POST"]
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_discovery_outage_raises_unavailable(
+    api_client_confidential, httpx_mock
+):
+    """With a store and no verified context, a discovery outage surfaces as the 503 error before any exchange."""
+    httpx_mock.add_exception(httpx.ConnectError("boom"), method="GET", url=DISCOVERY_URL)
+    token = await generate_token(domain="auth0.local", user_id="user_123", audience="my-audience")
+
+    with pytest.raises(AuthServerUnavailableError):
+        await api_client_confidential.get_token_on_behalf_of(
+            access_token=token,
+            audience="https://api.backend.com",
+        )
+
+    assert not [r for r in httpx_mock.get_requests() if r.method == "POST"]
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_verified_context_skips_reverification(
+    mock_discovery, api_client_confidential, httpx_mock, monkeypatch
+):
+    """A supplied verified context is trusted, so the client does not verify the token itself."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token"),
+    )
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("verify_access_token must not be called when verified is supplied")
+
+    monkeypatch.setattr(api_client_confidential, "verify_access_token", fail_if_called)
+
+    token = make_access_token("auth0|user1")
+    result = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token,
+        audience="https://api.backend.com",
+        verified=verified_for(token, "auth0|user1"),
+    )
+
+    assert result["access_token"] == "obo-access-token"
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_verified_claims_without_sub_skips_caching(
+    mock_discovery, api_client_confidential, httpx_mock, caplog
+):
+    """Verified claims that lack a usable sub skip caching with a warning, so each call re-exchanges."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-1"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-2"),
+    )
+
+    caplog.set_level(logging.WARNING)
+    token = make_access_token("auth0|user1")
+    no_sub = VerifiedToken(access_token=token, claims={"iss": CONFIDENTIAL_ISS})
+    result1 = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token, audience="https://api.backend.com", verified=no_sub
+    )
+    result2 = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token, audience="https://api.backend.com", verified=no_sub
+    )
+
+    assert result1["access_token"] == "obo-access-token-1"
+    assert result2["access_token"] == "obo-access-token-2"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+    assert any("no usable sub" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_verified_claims_without_iss_skips_caching(
+    mock_discovery, api_client_confidential, httpx_mock, caplog
+):
+    """Verified claims that lack iss skip caching with a warning, so each call re-exchanges."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-1"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-2"),
+    )
+
+    caplog.set_level(logging.WARNING)
+    token = make_access_token("auth0|user1")
+    no_iss = VerifiedToken(access_token=token, claims={"sub": "auth0|user1"})
+    result1 = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token, audience="https://api.backend.com", verified=no_iss
+    )
+    result2 = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token, audience="https://api.backend.com", verified=no_iss
+    )
+
+    assert result1["access_token"] == "obo-access-token-1"
+    assert result2["access_token"] == "obo-access-token-2"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+    assert any("no iss claim" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_verified_token_mismatch_raises(
+    api_client_confidential, httpx_mock
+):
+    """A verified token whose access_token differs from the one being exchanged is rejected."""
+    token = make_access_token("auth0|user1")
+    other = make_access_token("auth0|user2")
+
+    with pytest.raises(VerifyAccessTokenError):
+        await api_client_confidential.get_token_on_behalf_of(
+            access_token=token,
+            audience="https://api.backend.com",
+            verified=verified_for(other, "auth0|user2"),
+        )
+
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 0
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_different_sub_does_not_share_cache(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that tokens with different sub values each trigger their own exchange."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-1"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-2"),
+    )
+
+    token1 = make_access_token("auth0|user1")
+    token2 = make_access_token("auth0|user2")
+
+    await api_client_confidential.get_token_on_behalf_of(
+        access_token=token1, audience="https://api.backend.com", verified=verified_for(token1, "auth0|user1")
+    )
+    await api_client_confidential.get_token_on_behalf_of(
+        access_token=token2, audience="https://api.backend.com", verified=verified_for(token2, "auth0|user2")
+    )
+
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_different_org_id_does_not_share_cache(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that tokens with different org_id values each trigger their own exchange."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-1"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token-2"),
+    )
+
+    token1 = make_access_token("auth0|user1", org_id="org_abc")
+    token2 = make_access_token("auth0|user1", org_id="org_def")
+
+    await api_client_confidential.get_token_on_behalf_of(
+        access_token=token1, audience="https://api.backend.com",
+        verified=verified_for(token1, "auth0|user1", org_id="org_abc"),
+    )
+    await api_client_confidential.get_token_on_behalf_of(
+        access_token=token2, audience="https://api.backend.com",
+        verified=verified_for(token2, "auth0|user1", org_id="org_def"),
+    )
+
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_store_get_failure_falls_back_to_fresh_exchange(
+    mock_discovery, httpx_mock, caplog
+):
+    """Test that a token store whose get() raises still succeeds via a fresh exchange."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=RaisingGetTokenStore(),
+    ))
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token"),
+    )
+
+    token = make_access_token("auth0|user1")
+    caplog.set_level(logging.WARNING)
+    result = await api_client.get_token_on_behalf_of(
+        access_token=token,
+        audience="https://api.backend.com",
+        verified=verified_for(token, "auth0|user1"),
+    )
+
+    assert result["access_token"] == "obo-access-token"
+    assert any(
+        record.name == "auth0_api_python._internal.obo_cache" and "Token store read failed" in record.message
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_store_set_failure_still_returns_token(
+    mock_discovery, httpx_mock, caplog
+):
+    """Test that a token store whose set() raises still returns the exchanged token."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=RaisingSetTokenStore(),
+    ))
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token"),
+    )
+
+    token = make_access_token("auth0|user1")
+    caplog.set_level(logging.WARNING)
+    result = await api_client.get_token_on_behalf_of(
+        access_token=token,
+        audience="https://api.backend.com",
+        verified=verified_for(token, "auth0|user1"),
+    )
+
+    assert result["access_token"] == "obo-access-token"
+    assert any("Token store write failed" in record.message for record in caplog.records)
+
+
+class ExpiredEntryTokenStore(InMemoryTokenStore):
+    """Token store whose get() always returns an expired TokenSet."""
+
+    async def get(self, key: str):
+        return {"access_token": "expired-token", "expires_at": int(time.time()) - 10}
+
+
+class CorruptEntryTokenStore(InMemoryTokenStore):
+    """Token store whose get() returns a malformed entry missing required keys."""
+
+    async def get(self, key: str):
+        return {"not_a_token": "garbage"}
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_cache_hit_has_valid_expires_in(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that a cache hit returns expires_in > 0 and a future expires_at."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+
+    # First call — populate cache
+    await api_client_confidential.get_token_on_behalf_of(
+        access_token=token,
+        audience="https://api.backend.com",
+        scope="read:data",
+        verified=verified,
+    )
+    # Second call — cache hit
+    result = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token,
+        audience="https://api.backend.com",
+        scope="read:data",
+        verified=verified,
+    )
+
+    assert result["expires_in"] > 0
+    assert "expires_at" in result
+    assert result["expires_at"] > int(time.time())
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_cache_hit_preserves_empty_granted_scope(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that a cache hit for a token granted no scopes still reports an empty scope."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="obo-access-token", scope=""),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+
+    first = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token,
+        audience="https://api.backend.com",
+        verified=verified,
+    )
+    second = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token,
+        audience="https://api.backend.com",
+        verified=verified,
+    )
+
+    assert first["scope"] == ""
+    assert second["access_token"] == "obo-access-token"
+    assert second["scope"] == ""
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_expired_store_entry_triggers_fresh_exchange(
+    mock_discovery, httpx_mock
+):
+    """Test that a store returning an already-expired entry always triggers a fresh exchange."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=ExpiredEntryTokenStore(),
+    ))
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token-1"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token-2"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+
+    await api_client.get_token_on_behalf_of(access_token=token, audience="https://api.backend.com", verified=verified)
+    await api_client.get_token_on_behalf_of(access_token=token, audience="https://api.backend.com", verified=verified)
+
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("seconds_left", "expect_exchange"),
+    [(10, True), (3600, False)],
+    ids=["within-buffer-is-refreshed", "beyond-buffer-is-reused"],
+)
+async def test_get_token_on_behalf_of_cache_entry_expiry_buffer(
+    api_client_confidential, httpx_mock, seconds_left, expect_exchange
+):
+    """A cached entry about to expire is not reused, one with time to spare is."""
+    audience = "https://api.backend.com"
+    access_token = make_access_token("auth0|user1")
+    await api_client_confidential._token_store.set(
+        strict_key(access_token, audience=audience, scopes=None),
+        {"access_token": "cached-token", "expires_at": int(time.time()) + seconds_left},
+    )
+    if expect_exchange:
+        httpx_mock.add_response(method="GET", url=DISCOVERY_URL, json={"token_endpoint": TOKEN_ENDPOINT})
+        httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="fresh-token"))
+
+    result = await api_client_confidential.get_token_on_behalf_of(
+        access_token=access_token,
+        audience=audience,
+        verified=verified_for(access_token, "auth0|user1"),
+    )
+
+    assert result["access_token"] == ("fresh-token" if expect_exchange else "cached-token")
+    assert len([r for r in httpx_mock.get_requests() if r.method == "POST"]) == int(expect_exchange)
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_corrupt_store_value_treated_as_cache_miss(
+    mock_discovery, httpx_mock
+):
+    """Test that a corrupt/partial store value is treated as a cache miss and a fresh exchange happens."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=CorruptEntryTokenStore(),
+    ))
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token"),
+    )
+
+    token = make_access_token("auth0|user1")
+    result = await api_client.get_token_on_behalf_of(
+        access_token=token,
+        audience="https://api.backend.com",
+        verified=verified_for(token, "auth0|user1"),
+    )
+
+    assert result["access_token"] == "fresh-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_token_on_behalf_of_expired_cache_entry_triggers_fresh_exchange(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that an expired cached entry is not returned and a fresh exchange happens."""
+    audience = "https://api.backend.com"
+    access_token = make_access_token("auth0|user1")
+
+    cache_key = strict_key(access_token, audience=audience, scopes=None)
+    await api_client_confidential._token_store.set(
+        cache_key,
+        {"access_token": "expired-access-token", "expires_at": int(time.time()) - 10},
+    )
+
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-obo-access-token"),
+    )
+
+    result = await api_client_confidential.get_token_on_behalf_of(
+        access_token=access_token,
+        audience=audience,
+        verified=verified_for(access_token, "auth0|user1"),
+    )
+
+    assert result["access_token"] == "fresh-obo-access-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_strict_downscoped_cached_under_granted_scope(mock_discovery, api_client_confidential, httpx_mock):
+    """strict downscoping: a grant narrower than the request is reusable only for the granted subset."""
+    audience = "https://api.backend.com"
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="narrow-token", scope="read:x"))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="wide-token", scope="read:x write:x"))
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    # Request read:x write:x, Auth0 downscopes to read:x (fresh downscoping).
+    r1 = await api_client_confidential.get_token_on_behalf_of(access_token=token, audience=audience, scope="read:x write:x", verified=verified)
+    # The granted subset is a hit (cached downscoping).
+    r2 = await api_client_confidential.get_token_on_behalf_of(access_token=token, audience=audience, scope="read:x", verified=verified)
+    # Re-requesting the wider scope is a miss under strict, so a fresh exchange runs.
+    r3 = await api_client_confidential.get_token_on_behalf_of(access_token=token, audience=audience, scope="read:x write:x", verified=verified)
+
+    assert r1["access_token"] == "narrow-token"
+    assert r2["access_token"] == "narrow-token"
+    assert r3["access_token"] == "wide-token"
+    posts = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(posts) == 2
+
+
+@pytest.mark.asyncio
+async def test_obo_different_issuer_does_not_share_cache(mock_discovery, api_client_confidential, httpx_mock):
+    """A cached token is not reused when the verified issuer differs, even for the same subject and token."""
+    audience = "https://api.backend.com"
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="issuer-a-token"))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="issuer-b-token"))
+
+    token = make_access_token("auth0|user1")
+    r1 = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token, audience=audience, verified=verified_for(token, "auth0|user1", iss="https://issuer-a/"))
+    r2 = await api_client_confidential.get_token_on_behalf_of(
+        access_token=token, audience=audience, verified=verified_for(token, "auth0|user1", iss="https://issuer-b/"))
+
+    assert r1["access_token"] == "issuer-a-token"
+    assert r2["access_token"] == "issuer-b-token"
+    posts = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(posts) == 2
+
+
+# ----- M2M -----
+
+
+class _RaisingGetTokenStore(InMemoryTokenStore):
+    """Token store whose get() always raises, to verify read failures fall back to a fresh exchange."""
+
+    async def get(self, key):
+        raise RuntimeError("store unavailable")
+
+
+class _RaisingSetTokenStore(InMemoryTokenStore):
+    """Token store whose set() always raises, to verify write failures don't fail the caller."""
+
+    async def set(self, key, value):
+        raise RuntimeError("store unavailable")
+
+
+class _StubStaleEntryTokenStore(InMemoryTokenStore):
+    """Token store that returns entries without checking expires_at, so the SDK's own expiry check runs."""
+
+    async def get(self, key):
+        return self._store.get(key)
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_cache_hit(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Cache hit: two calls for the same audience+scope perform only one network exchange.
+
+    MUTATION-CHECKED: disabling the cache check (e.g. setting _token_store = None) causes
+    this test to fail because a second POST is made and len(token_requests) == 2 != 1.
+    """
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="m2m-access-token"),
+    )
+
+    result1 = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+    result2 = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+
+    assert result1["access_token"] == "m2m-access-token"
+    assert result2["access_token"] == "m2m-access-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_cache_hit_returns_granted_scope(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """A cache hit returns the same scope Auth0 granted on the original exchange."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="m2m-access-token", scope="admin:billing read:billing"),
+    )
+
+    miss = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+    hit = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+
+    assert miss["scope"] == "admin:billing read:billing"
+    assert hit["scope"] == miss["scope"]
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_cache_hit_without_scope_in_response(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """A cache hit has no scope when Auth0 did not return one, matching the fresh exchange."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="m2m-access-token"),
+    )
+
+    await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+    hit = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+
+    assert "scope" not in hit
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_cache_hit_matches_fresh_result(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """A cache hit returns the same fields as the fresh exchange, including token_type and an empty scope."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="m2m-access-token", token_type="Bearer", scope=""),
+    )
+
+    miss = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+    hit = await api_client_confidential.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+        scope="admin:billing",
+    )
+
+    assert hit["token_type"] == "Bearer"
+    assert hit["scope"] == ""
+    assert set(hit) == set(miss)
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_different_scope_is_a_cache_miss(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """The same audience with a different scope does not reuse the cached token."""
+    audience = "https://billing-api.example.com"
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="read-token"))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="write-token"))
+
+    r1 = await api_client_confidential.get_client_credentials_token(audience=audience, scope="read:billing")
+    r2 = await api_client_confidential.get_client_credentials_token(audience=audience, scope="write:billing")
+
+    assert r1["access_token"] == "read-token"
+    assert r2["access_token"] == "write-token"
+    assert len([r for r in httpx_mock.get_requests() if r.method == "POST"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_cache_miss_after_expiry(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Test that an expired cached M2M entry triggers a fresh exchange."""
+    audience = "https://billing-api.example.com"
+    cache_key = m2m_cache_key(tenant="auth0.local", client_id="cid", audience=audience, scopes="admin:billing")
+    await api_client_confidential._token_store.set(
+        cache_key,
+        {"access_token": "stale-m2m-token", "expires_at": int(time.time()) - 10},
+    )
+
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-m2m-token"),
+    )
+
+    result = await api_client_confidential.get_client_credentials_token(
+        audience=audience,
+        scope="admin:billing",
+    )
+
+    assert result["access_token"] == "fresh-m2m-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("seconds_left", "expect_exchange"),
+    [(10, True), (3600, False)],
+    ids=["within-buffer-is-refreshed", "beyond-buffer-is-reused"],
+)
+async def test_get_client_credentials_token_cache_entry_expiry_buffer(
+    api_client_confidential, httpx_mock, seconds_left, expect_exchange
+):
+    """A cached M2M entry about to expire is not reused, one with time to spare is."""
+    audience = "https://billing-api.example.com"
+    cache_key = m2m_cache_key(tenant="auth0.local", client_id="cid", audience=audience, scopes=None)
+    await api_client_confidential._token_store.set(
+        cache_key,
+        {"access_token": "cached-m2m-token", "expires_at": int(time.time()) + seconds_left},
+    )
+    if expect_exchange:
+        httpx_mock.add_response(method="GET", url=DISCOVERY_URL, json={"token_endpoint": TOKEN_ENDPOINT})
+        httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="fresh-m2m-token"))
+
+    result = await api_client_confidential.get_client_credentials_token(audience=audience)
+
+    assert result["access_token"] == ("fresh-m2m-token" if expect_exchange else "cached-m2m-token")
+    assert len([r for r in httpx_mock.get_requests() if r.method == "POST"]) == int(expect_exchange)
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_expired_entry_from_store_is_not_served(
+    mock_discovery, httpx_mock
+):
+    """The SDK rejects an expired entry even when the store hands it back."""
+    audience = "https://billing-api.example.com"
+    store = _StubStaleEntryTokenStore()
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=store,
+    ))
+    cache_key = m2m_cache_key(tenant="auth0.local", client_id="cid", audience=audience, scopes=None)
+    await store.set(cache_key, {"access_token": "stale-m2m-token", "expires_at": int(time.time()) - 10})
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="fresh-m2m-token"))
+
+    result = await api_client.get_client_credentials_token(audience=audience)
+
+    assert result["access_token"] == "fresh-m2m-token"
+    assert len([r for r in httpx_mock.get_requests() if r.method == "POST"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_store_read_failure_falls_back(
+    mock_discovery, httpx_mock, caplog
+):
+    """Test that a store read failure falls back to a fresh exchange."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=_RaisingGetTokenStore(),
+    ))
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="m2m-access-token"),
+    )
+
+    caplog.set_level(logging.WARNING)
+    result = await api_client.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+    )
+
+    assert result["access_token"] == "m2m-access-token"
+    assert any("Token store read failed" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_store_write_failure_still_returns(
+    mock_discovery, httpx_mock, caplog
+):
+    """Test that a store write failure still returns the token."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=_RaisingSetTokenStore(),
+    ))
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="m2m-access-token"),
+    )
+
+    caplog.set_level(logging.WARNING)
+    result = await api_client.get_client_credentials_token(
+        audience="https://billing-api.example.com",
+    )
+
+    assert result["access_token"] == "m2m-access-token"
+    assert any("Token store write failed" in record.message for record in caplog.records)
+
+
+# ----- OBO non_strict -----
+
+def _nss_client(token_store=None):
+    """Build a confidential client with scope_matching='non_strict', which needs an indexed store."""
+    return ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=token_store or InMemoryIndexedTokenStore(),
+        scope_matching="non_strict",
+    ))
+
+
+@pytest.mark.asyncio
+async def test_nss_exact_scope_hit(mock_discovery, httpx_mock):
+    """non_strict: exact scope repeat returns cached token with no second exchange."""
+    client = _nss_client()
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="nss-token", scope="read:x"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    result1 = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+    result2 = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+
+    assert result1["access_token"] == "nss-token"
+    assert result2["access_token"] == "nss-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_superset_granted_covers_subset_request(mock_discovery, httpx_mock):
+    """non_strict: a request for a subset of the cached granted scopes reuses the token."""
+    client = _nss_client()
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="wide-token", scope="read:x write:x"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x write:x", verified=verified)
+    result = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+
+    assert result["access_token"] == "wide-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_not_covered_triggers_fresh_exchange(mock_discovery, httpx_mock):
+    """non_strict: a request whose scopes exceed the cached granted scopes triggers a fresh exchange."""
+    client = _nss_client()
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="narrow-token", scope="read:x"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="wide-token", scope="read:x write:x"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    result1 = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+    result2 = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x write:x", verified=verified)
+
+    assert result1["access_token"] == "narrow-token"
+    assert result2["access_token"] == "wide-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_nss_downscoped_grant_reused_for_subset(mock_discovery, httpx_mock):
+    """non_strict downscoping: a grant narrower than the request is cached and reused for its subset."""
+    client = _nss_client()
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="downscoped-token", scope="read:x"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    # Request read:x write:x but Auth0 grants only read:x (fresh downscoping).
+    result1 = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x write:x", verified=verified)
+    # Requesting the granted subset reuses it (cached downscoping), no second exchange.
+    result2 = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+
+    assert result1["access_token"] == "downscoped-token"
+    assert result2["access_token"] == "downscoped-token"
+    post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(post_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_omitted_scope_never_reuses(mock_discovery, httpx_mock):
+    """non_strict: a scopeless request never reuses a cached token, since every grant would cover it."""
+    client = _nss_client()
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="scoped-token", scope="read:x"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+    result = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", verified=verified)
+
+    assert result["access_token"] == "fresh-token"
+    post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(post_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_nss_covering_check_uses_granted_not_requested(mock_discovery, httpx_mock):
+    """non_strict: the covering check uses a cached member's granted_scopes, not the original request."""
+    client = _nss_client()
+    token = make_access_token("auth0|user1")
+    audience = "https://api.example.com"
+
+    # Seed a live index member that was granted only read:x.
+    await client._token_store.add_index_member(
+        index_key(token, audience=audience),
+        {
+            "token_key": index_token_key(token, audience=audience, scopes="read:x"),
+            "granted_scopes": "read:x",
+            "expires_at": int(time.time()) + 3600,
+        },
+    )
+    await client._token_store.set(
+        index_token_key(token, audience=audience, scopes="read:x"),
+        {"access_token": "narrow-cached-token", "expires_at": int(time.time()) + 3600, "granted_scopes": "read:x"},
+    )
+
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-wide-token", scope="read:x write:x"),
+    )
+
+    # read:x does not cover read:x write:x, so the seeded member is not reused.
+    result = await client.get_token_on_behalf_of(access_token=token, audience=audience, scope="read:x write:x", verified=verified_for(token, "auth0|user1"))
+
+    assert result["access_token"] == "fresh-wide-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_invalid_scope_matching_raises_configuration_error():
+    """ApiClient construction with an invalid scope_matching value raises ConfigurationError."""
+    with pytest.raises(ConfigurationError) as err:
+        ApiClient(ApiClientOptions(
+            domain="auth0.local",
+            audience="my-audience",
+            scope_matching="invalid_value",
+        ))
+
+    assert "scope_matching" in str(err.value)
+
+
+def test_nss_requires_indexed_store():
+    """non_strict with a plain AbstractTokenStore raises ConfigurationError at construction."""
+    with pytest.raises(ConfigurationError) as err:
+        ApiClient(ApiClientOptions(
+            domain="auth0.local",
+            audience="my-audience",
+            client_id="cid",
+            client_secret="csecret",
+            token_store=InMemoryTokenStore(),
+            scope_matching="non_strict",
+        ))
+    assert "IndexedTokenStore" in str(err.value)
+
+
+def test_nss_requires_a_token_store():
+    """non_strict with no token_store raises ConfigurationError at construction."""
+    with pytest.raises(ConfigurationError) as err:
+        ApiClient(ApiClientOptions(
+            domain="auth0.local",
+            audience="my-audience",
+            client_id="cid",
+            client_secret="csecret",
+            scope_matching="non_strict",
+        ))
+    assert "IndexedTokenStore" in str(err.value)
+
+
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
+@pytest.mark.asyncio
+async def test_strict_and_non_strict_do_not_share_cache(mock_discovery, httpx_mock):
+    """A token cached in strict layout is invisible to a non_strict client sharing the same store."""
+    store = InMemoryIndexedTokenStore()
+    strict_client = ApiClient(ApiClientOptions(
+        domain="auth0.local", audience="my-audience", client_id="cid", client_secret="csecret",
+        token_store=store, scope_matching="strict",
+    ))
+    nss_client = ApiClient(ApiClientOptions(
+        domain="auth0.local", audience="my-audience", client_id="cid", client_secret="csecret",
+        token_store=store, scope_matching="non_strict",
+    ))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="strict-token", scope="read:x"))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="nss-token", scope="read:x"))
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    r1 = await strict_client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+    r2 = await nss_client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+
+    assert r1["access_token"] == "strict-token"
+    assert r2["access_token"] == "nss-token"
+    post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(post_requests) == 2
+
+
+# ----- OBO non_strict index -----
+
+class RaisingListIndexTokenStore(InMemoryIndexedTokenStore):
+    """Indexed store whose list_index_members() raises, to verify index read failures fall back to a fresh exchange."""
+
+    async def list_index_members(self, index_key):
+        raise RuntimeError("store unavailable")
+
+
+class RaisingGetIndexTokenStore(InMemoryIndexedTokenStore):
+    """Indexed store whose get() raises, to verify a member's token read failure falls back to a fresh exchange."""
+
+    async def get(self, key):
+        raise RuntimeError("store unavailable")
+
+
+class CountingRaisingGetIndexTokenStore(RaisingGetIndexTokenStore):
+    """Raising indexed store that counts get() calls, to verify the lookup stops at the first failed read."""
+
+    def __init__(self):
+        super().__init__()
+        self.get_calls = 0
+
+    async def get(self, key):
+        self.get_calls += 1
+        await super().get(key)
+
+
+class NonIterableListIndexTokenStore(InMemoryIndexedTokenStore):
+    """Indexed store whose list_index_members() returns a non-iterable, to verify a bad index read is a miss."""
+
+    async def list_index_members(self, index_key):
+        return None
+
+
+class RaisingAddIndexTokenStore(InMemoryIndexedTokenStore):
+    """Indexed store whose add_index_member() raises, to verify index write failures don't fail the caller."""
+
+    async def add_index_member(self, index_key, member):
+        raise RuntimeError("store unavailable")
+
+
+@pytest.mark.asyncio
+async def test_nss_index_upscope_reuse(mock_discovery, httpx_mock):
+    """Index: a wide token minted first is reused for a narrower subsequent request."""
+    client = _nss_client()
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="wide-token", scope="read:x write:x"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    result1 = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x write:x", verified=verified)
+    result2 = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+
+    assert result1["access_token"] == "wide-token"
+    assert result2["access_token"] == "wide-token"
+    post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(post_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_index_no_evict(mock_discovery, httpx_mock):
+    """Index: minting a non-covering token does not evict a previously cached token."""
+    client = _nss_client()
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="read-token", scope="read:x"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="write-token", scope="write:x"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+    await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="write:x", verified=verified)
+    result3 = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+
+    # read:x entry must still be cached - exchange should have run exactly twice
+    assert result3["access_token"] == "read-token"
+    post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(post_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_nss_index_expired_member_not_reused(mock_discovery, httpx_mock):
+    """Index: an expired member is skipped and a fresh exchange runs."""
+    client = _nss_client()
+    token = make_access_token("auth0|user1")
+    audience = "https://api.example.com"
+
+    # Index member is expired but its token value is still live, so only the index-level expiry check
+    # keeps it from being reused. Removing that check would surface the live value as a hit.
+    token_key = index_token_key(token, audience=audience, scopes="read:x")
+    await client._token_store.add_index_member(index_key(token, audience=audience), {
+        "token_key": token_key,
+        "granted_scopes": "read:x",
+        "expires_at": int(time.time()) - 10,
+    })
+    await client._token_store.set(
+        token_key,
+        {"access_token": "stale-cached-token", "expires_at": int(time.time()) + 3600, "granted_scopes": "read:x"},
+    )
+
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token", scope="read:x"),
+    )
+
+    result = await client.get_token_on_behalf_of(access_token=token, audience=audience, scope="read:x", verified=verified_for(token, "auth0|user1"))
+
+    assert result["access_token"] == "fresh-token"
+    post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(post_requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("seconds_left", "expect_exchange"),
+    [(10, True), (3600, False)],
+    ids=["within-buffer-is-refreshed", "beyond-buffer-is-reused"],
+)
+async def test_nss_index_member_expiry_buffer(httpx_mock, seconds_left, expect_exchange):
+    """Index: a member about to expire is not reused, one with time to spare is."""
+    client = _nss_client()
+    token = make_access_token("auth0|user1")
+    audience = "https://api.example.com"
+    expires_at = int(time.time()) + seconds_left
+
+    token_key = index_token_key(token, audience=audience, scopes="read:x")
+    await client._token_store.add_index_member(index_key(token, audience=audience), {
+        "token_key": token_key,
+        "granted_scopes": "read:x",
+        "expires_at": expires_at,
+    })
+    await client._token_store.set(
+        token_key,
+        {"access_token": "cached-token", "expires_at": expires_at, "granted_scopes": "read:x"},
+    )
+    if expect_exchange:
+        httpx_mock.add_response(method="GET", url=DISCOVERY_URL, json={"token_endpoint": TOKEN_ENDPOINT})
+        httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="fresh-token", scope="read:x"))
+
+    result = await client.get_token_on_behalf_of(access_token=token, audience=audience, scope="read:x", verified=verified_for(token, "auth0|user1"))
+
+    assert result["access_token"] == ("fresh-token" if expect_exchange else "cached-token")
+    assert len([r for r in httpx_mock.get_requests() if r.method == "POST"]) == int(expect_exchange)
+
+
+@pytest.mark.asyncio
+async def test_nss_index_list_failure_falls_back_to_exchange(mock_discovery, httpx_mock):
+    """Index: a failing index read is treated as a miss and a fresh exchange runs."""
+    client = _nss_client(token_store=RaisingListIndexTokenStore())
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token", scope="read:x"),
+    )
+
+    token = make_access_token("auth0|user1")
+    result = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified_for(token, "auth0|user1"))
+
+    assert result["access_token"] == "fresh-token"
+    post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(post_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_index_member_read_failure_falls_back_to_exchange(mock_discovery, httpx_mock):
+    """Index: a live member whose token read fails is treated as a miss and a fresh exchange runs."""
+    client = _nss_client(token_store=RaisingGetIndexTokenStore())
+    token = make_access_token("auth0|user1")
+    audience = "https://api.example.com"
+
+    await client._token_store.add_index_member(index_key(token, audience=audience), {
+        "token_key": index_token_key(token, audience=audience, scopes="read:x"),
+        "granted_scopes": "read:x",
+        "expires_at": int(time.time()) + 3600,
+    })
+
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token", scope="read:x"),
+    )
+
+    result = await client.get_token_on_behalf_of(access_token=token, audience=audience, scope="read:x", verified=verified_for(token, "auth0|user1"))
+
+    assert result["access_token"] == "fresh-token"
+    post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(post_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_index_stops_at_first_failed_member_read(mock_discovery, httpx_mock):
+    """Index: after one member's token read fails, the remaining candidates are not read."""
+    store = CountingRaisingGetIndexTokenStore()
+    client = _nss_client(token_store=store)
+    token = make_access_token("auth0|user1")
+    audience = "https://api.example.com"
+
+    for scopes in ("read:x", "read:x read:y"):
+        await store.add_index_member(index_key(token, audience=audience), {
+            "token_key": index_token_key(token, audience=audience, scopes=scopes),
+            "granted_scopes": scopes,
+            "expires_at": int(time.time()) + 3600,
+        })
+
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token", scope="read:x"),
+    )
+
+    result = await client.get_token_on_behalf_of(access_token=token, audience=audience, scope="read:x", verified=verified_for(token, "auth0|user1"))
+
+    assert result["access_token"] == "fresh-token"
+    assert store.get_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_index_non_iterable_member_list_treated_as_miss(mock_discovery, httpx_mock):
+    """Index: a store returning a non-iterable member list is a miss, so a fresh exchange runs without raising."""
+    client = _nss_client(token_store=NonIterableListIndexTokenStore())
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token", scope="read:x"),
+    )
+
+    token = make_access_token("auth0|user1")
+    result = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified_for(token, "auth0|user1"))
+
+    assert result["access_token"] == "fresh-token"
+
+
+@pytest.mark.asyncio
+async def test_nss_index_whitespace_scope_is_never_served_from_cache(mock_discovery, httpx_mock):
+    """Index: a whitespace-only scope is unscoped, so it never reuses a cached token."""
+    client = _nss_client()
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="scoped-token", scope="read:x"))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="unscoped-token"))
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified)
+    result = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="   ", verified=verified)
+
+    assert result["access_token"] == "unscoped-token"
+
+
+@pytest.mark.asyncio
+async def test_nss_index_malformed_member_treated_as_miss(mock_discovery, httpx_mock):
+    """Index: a member missing required fields is skipped, so a fresh exchange runs without raising."""
+    client = _nss_client()
+    token = make_access_token("auth0|user1")
+    audience = "https://api.example.com"
+
+    # A member lacking granted_scopes and expires_at must not break the lookup.
+    await client._token_store.add_index_member(
+        index_key(token, audience=audience),
+        {"token_key": index_token_key(token, audience=audience, scopes="read:x")},
+    )
+
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token", scope="read:x"),
+    )
+
+    result = await client.get_token_on_behalf_of(
+        access_token=token, audience=audience, scope="read:x", verified=verified_for(token, "auth0|user1")
+    )
+
+    assert result["access_token"] == "fresh-token"
+    post_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(post_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_nss_index_add_failure_still_returns_token(mock_discovery, httpx_mock):
+    """Index: a failing index write does not fail the caller, the token is still returned."""
+    client = _nss_client(token_store=RaisingAddIndexTokenStore())
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-token", scope="read:x"),
+    )
+
+    token = make_access_token("auth0|user1")
+    result = await client.get_token_on_behalf_of(access_token=token, audience="https://api.example.com", scope="read:x", verified=verified_for(token, "auth0|user1"))
+
+    assert result["access_token"] == "fresh-token"
+
+
+class BlobRewriteIndexedTokenStore(InMemoryIndexedTokenStore):
+    """Adversarial store that maintains the index with a non-atomic read-modify-write, to show
+    the atomic per-member add the SDK relies on is what keeps a concurrent addition from being lost."""
+
+    async def add_index_member(self, index_key, member):
+        current = dict(self._index.get(index_key, {}))
+        await asyncio.sleep(0)  # yield mid read-modify-write so a concurrent add is lost
+        current[member["token_key"]] = member
+        self._index[index_key] = current
+
+
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
+@pytest.mark.asyncio
+async def test_nss_index_concurrent_adds_both_survive(mock_discovery, httpx_mock):
+    """Index: two concurrent exchanges for different scopes both stay cached, no lost update."""
+    client = _nss_client()
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="t"))
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    aud = "https://api.example.com"
+    await asyncio.gather(
+        client.get_token_on_behalf_of(access_token=token, audience=aud, scope="read:x", verified=verified),
+        client.get_token_on_behalf_of(access_token=token, audience=aud, scope="write:x", verified=verified),
+    )
+    posts_after_concurrent = len([r for r in httpx_mock.get_requests() if r.method == "POST"])
+
+    # Both scopes must now be cached, so neither follow-up triggers a fresh exchange.
+    await client.get_token_on_behalf_of(access_token=token, audience=aud, scope="read:x", verified=verified)
+    await client.get_token_on_behalf_of(access_token=token, audience=aud, scope="write:x", verified=verified)
+
+    posts_total = len([r for r in httpx_mock.get_requests() if r.method == "POST"])
+    assert posts_after_concurrent == 2
+    assert posts_total == 2
+
+
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
+@pytest.mark.asyncio
+async def test_nss_index_non_atomic_store_loses_concurrent_add(mock_discovery, httpx_mock):
+    """Mutation check for the concurrency guarantee: a non-atomic read-modify-write store loses one
+    of two concurrent additions, so the dropped scope has to exchange again on the next call."""
+    client = _nss_client(token_store=BlobRewriteIndexedTokenStore())
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="t"))
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token, "auth0|user1")
+    aud = "https://api.example.com"
+    await asyncio.gather(
+        client.get_token_on_behalf_of(access_token=token, audience=aud, scope="read:x", verified=verified),
+        client.get_token_on_behalf_of(access_token=token, audience=aud, scope="write:x", verified=verified),
+    )
+
+    await client.get_token_on_behalf_of(access_token=token, audience=aud, scope="read:x", verified=verified)
+    await client.get_token_on_behalf_of(access_token=token, audience=aud, scope="write:x", verified=verified)
+
+    # 2 concurrent exchanges plus 1 re-exchange for the member the non-atomic store dropped.
+    posts_total = len([r for r in httpx_mock.get_requests() if r.method == "POST"])
+    assert posts_total == 3
+
+
+# ----- Token Vault (get_access_token_for_connection) -----
+
+
+def tv_key(sub: str, connection: str) -> str:
+    """The token_vault_cache_key for the confidential fixture's tenant and client."""
+    return token_vault_cache_key(
+        sub=sub, connection=connection,
+        tenant=CONFIDENTIAL_TENANT, client_id=CONFIDENTIAL_CID,
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_cache_hit(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Cache hit: two calls for the same sub+connection perform only one network exchange.
+
+    MUTATION-CHECKED: removing the lookup call from get_access_token_for_connection causes
+    this test to fail because a second POST is made and len(token_requests) == 2 != 1.
+    """
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-access-token"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = VerifiedToken(access_token=token, claims={"sub": "auth0|user1", "iss": CONFIDENTIAL_ISS})
+
+    result1 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token},
+        verified=verified,
+    )
+    result2 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token},
+        verified=verified,
+    )
+
+    assert result1["access_token"] == "tv-access-token"
+    assert result2["access_token"] == "tv-access-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exchange_scope", [{"scope": "read:calendar"}, {}])
+async def test_get_access_token_for_connection_cache_hit_matches_fresh_result(
+    mock_discovery, api_client_confidential, httpx_mock, exchange_scope
+):
+    """A cache hit carries the same keys as a fresh result, with or without a scope in the exchange response."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-access-token", **exchange_scope),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token)
+    options = {"connection": "google-oauth2", "access_token": token}
+
+    fresh = await api_client_confidential.get_access_token_for_connection(options, verified=verified)
+    hit = await api_client_confidential.get_access_token_for_connection(options, verified=verified)
+
+    assert hit.keys() == fresh.keys()
+    assert hit["scope"] == fresh["scope"]
+    assert hit["expires_at"] == fresh["expires_at"]
+    assert 0 < hit["expires_in"] <= fresh["expires_in"]
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_different_login_hint_not_reused(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """Two linked accounts on one connection each get their own token, and each hint then hits its own entry."""
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="tv-account-a"))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="tv-account-b"))
+
+    token = make_access_token("auth0|user1")
+    verified = verified_for(token)
+
+    def options(hint):
+        return {"connection": "google-oauth2", "access_token": token, "login_hint": hint}
+
+    a1 = await api_client_confidential.get_access_token_for_connection(options("a@example.com"), verified=verified)
+    b1 = await api_client_confidential.get_access_token_for_connection(options("b@example.com"), verified=verified)
+    a2 = await api_client_confidential.get_access_token_for_connection(options("a@example.com"), verified=verified)
+    b2 = await api_client_confidential.get_access_token_for_connection(options("b@example.com"), verified=verified)
+
+    assert [a1["access_token"], b1["access_token"]] == ["tv-account-a", "tv-account-b"]
+    assert a2["access_token"] == "tv-account-a"
+    assert b2["access_token"] == "tv-account-b"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_cache_miss_after_expiry(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """An expired cached entry triggers a fresh exchange."""
+    key = tv_key("auth0|user1", "google-oauth2")
+    await api_client_confidential._token_store.set(
+        key,
+        {"access_token": "stale-tv-token", "expires_at": int(time.time()) - 10},
+    )
+
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="fresh-tv-token"),
+    )
+
+    token = make_access_token("auth0|user1")
+    result = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token},
+        verified=VerifiedToken(access_token=token, claims={"sub": "auth0|user1", "iss": CONFIDENTIAL_ISS}),
+    )
+
+    assert result["access_token"] == "fresh-tv-token"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("seconds_left", "expect_exchange"),
+    [(10, True), (3600, False)],
+    ids=["within-buffer-is-refreshed", "beyond-buffer-is-reused"],
+)
+async def test_get_access_token_for_connection_cache_entry_expiry_buffer(
+    api_client_confidential, httpx_mock, seconds_left, expect_exchange
+):
+    """A cached entry about to expire is not reused, one with time to spare is."""
+    await api_client_confidential._token_store.set(
+        tv_key("auth0|user1", "google-oauth2"),
+        {"access_token": "cached-tv-token", "expires_at": int(time.time()) + seconds_left},
+    )
+    if expect_exchange:
+        httpx_mock.add_response(method="GET", url=DISCOVERY_URL, json={"token_endpoint": TOKEN_ENDPOINT})
+        httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="fresh-tv-token"))
+
+    token = make_access_token("auth0|user1")
+    result = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token},
+        verified=VerifiedToken(access_token=token, claims={"sub": "auth0|user1", "iss": CONFIDENTIAL_ISS}),
+    )
+
+    assert result["access_token"] == ("fresh-tv-token" if expect_exchange else "cached-tv-token")
+    assert len([r for r in httpx_mock.get_requests() if r.method == "POST"]) == int(expect_exchange)
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_different_connection_not_reused(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """A cached entry for connection A is not returned for connection B."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-token-a"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-token-b"),
+    )
+
+    token = make_access_token("auth0|user1")
+    verified = VerifiedToken(access_token=token, claims={"sub": "auth0|user1", "iss": CONFIDENTIAL_ISS})
+
+    result_a = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token}, verified=verified
+    )
+    result_b = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "github", "access_token": token}, verified=verified
+    )
+
+    assert result_a["access_token"] == "tv-token-a"
+    assert result_b["access_token"] == "tv-token-b"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_different_sub_not_reused(
+    mock_discovery, api_client_confidential, httpx_mock
+):
+    """A cached entry for sub A is not returned for sub B."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-token-user1"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-token-user2"),
+    )
+
+    token1 = make_access_token("auth0|user1")
+    token2 = make_access_token("auth0|user2")
+
+    result1 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token1},
+        verified=VerifiedToken(access_token=token1, claims={"sub": "auth0|user1", "iss": CONFIDENTIAL_ISS}),
+    )
+    result2 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token2},
+        verified=VerifiedToken(access_token=token2, claims={"sub": "auth0|user2", "iss": CONFIDENTIAL_ISS}),
+    )
+
+    assert result1["access_token"] == "tv-token-user1"
+    assert result2["access_token"] == "tv-token-user2"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_store_read_failure_falls_back(
+    mock_discovery, httpx_mock, caplog
+):
+    """A store read failure logs a warning and falls back to a fresh exchange."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=RaisingGetTokenStore(),
+    ))
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-access-token"),
+    )
+
+    token = make_access_token("auth0|user1")
+    caplog.set_level(logging.WARNING)
+    result = await api_client.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token},
+        verified=VerifiedToken(access_token=token, claims={"sub": "auth0|user1", "iss": CONFIDENTIAL_ISS}),
+    )
+
+    assert result["access_token"] == "tv-access-token"
+    assert any("Token store read failed" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_no_sub_skips_cache(
+    mock_discovery, api_client_confidential, httpx_mock, caplog
+):
+    """A token without a sub claim skips caching with a warning, so each call re-exchanges."""
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-token-1"),
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-token-2"),
+    )
+
+    token = make_access_token("auth0|user1")
+    no_sub = VerifiedToken(access_token=token, claims={"iss": CONFIDENTIAL_ISS})
+
+    caplog.set_level(logging.WARNING)
+    result1 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token}, verified=no_sub
+    )
+    result2 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token}, verified=no_sub
+    )
+
+    assert result1["access_token"] == "tv-token-1"
+    assert result2["access_token"] == "tv-token-2"
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 2
+    assert any("no usable sub" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_non_string_sub_skips_cache(
+    mock_discovery, api_client_confidential, httpx_mock, caplog
+):
+    """A non-string sub skips caching with a warning instead of failing the exchange."""
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="tv-token-1"))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="tv-token-2"))
+
+    token = make_access_token("auth0|user1")
+    bad_sub = VerifiedToken(access_token=token, claims={"sub": 12345, "iss": CONFIDENTIAL_ISS})
+
+    caplog.set_level(logging.WARNING)
+    result1 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token}, verified=bad_sub
+    )
+    result2 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token}, verified=bad_sub
+    )
+
+    assert result1["access_token"] == "tv-token-1"
+    assert result2["access_token"] == "tv-token-2"
+    assert any("no usable sub" in record.message for record in caplog.records)
+
+
+class _StubMalformedEntryTokenStore(InMemoryTokenStore):
+    """Token store whose get() returns a fixed entry."""
+
+    def __init__(self, entry):
+        super().__init__()
+        self._entry = entry
+
+    async def get(self, key: str):
+        return self._entry
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"access_token": "cached", "expires_at": "9999999999"},
+        {"access_token": "cached", "expires_at": None},
+        {"access_token": "", "expires_at": 9999999999},
+        {"access_token": 123, "expires_at": 9999999999},
+    ],
+)
+async def test_get_access_token_for_connection_malformed_entry_is_a_miss(
+    mock_discovery, httpx_mock, caplog, entry
+):
+    """An entry with a wrong-typed field is treated as a miss and the exchange still succeeds."""
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        token_store=_StubMalformedEntryTokenStore(entry),
+    ))
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success(access_token="fresh-tv-token"))
+
+    token = make_access_token("auth0|user1")
+    caplog.set_level(logging.WARNING)
+    result = await api_client.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token}, verified=verified_for(token)
+    )
+
+    assert result["access_token"] == "fresh-tv-token"
+    assert any("malformed entry" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_no_verified_calls_verify(
+    mock_discovery, api_client_confidential, httpx_mock, monkeypatch
+):
+    """With no verified= param, the client calls verify_access_token before the exchange.
+
+    verify_access_token is called once per invocation even when the second call hits the cache,
+    because verification precedes the cache lookup. The POST exchange fires only once.
+    """
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        json=token_success(access_token="tv-access-token"),
+    )
+
+    verify_calls = []
+
+    async def stub_verify(access_token: str):
+        verify_calls.append(access_token)
+        return {"sub": "auth0|user1", "iss": CONFIDENTIAL_ISS}
+
+    monkeypatch.setattr(api_client_confidential, "verify_access_token", stub_verify)
+
+    token = make_access_token("auth0|user1")
+    result1 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token},
+    )
+    result2 = await api_client_confidential.get_access_token_for_connection(
+        {"connection": "google-oauth2", "access_token": token},
+    )
+
+    assert result1["access_token"] == "tv-access-token"
+    assert result2["access_token"] == "tv-access-token"
+    assert len(verify_calls) == 2
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_discovery_outage_raises_unavailable(
+    api_client_confidential, httpx_mock
+):
+    """With a store and no verified context, a discovery outage surfaces as the 503 error before any exchange."""
+    httpx_mock.add_exception(httpx.ConnectError("boom"), method="GET", url=DISCOVERY_URL)
+    token = await generate_token(domain="auth0.local", user_id="user_123", audience="my-audience")
+
+    with pytest.raises(AuthServerUnavailableError):
+        await api_client_confidential.get_access_token_for_connection(
+            {"connection": "google-oauth2", "access_token": token},
+        )
+
+    assert not [r for r in httpx_mock.get_requests() if r.method == "POST"]
+
+
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_verified_mismatch_raises(
+    api_client_confidential, httpx_mock
+):
+    """A verified token whose access_token differs from the one being exchanged is rejected."""
+    token = make_access_token("auth0|user1")
+    other = make_access_token("auth0|user2")
+
+    with pytest.raises(VerifyAccessTokenError):
+        await api_client_confidential.get_access_token_for_connection(
+            {"connection": "google-oauth2", "access_token": token},
+            verified=verified_for(other, "auth0|user2"),
+        )
+
+    token_requests = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(token_requests) == 0
 
 
 # ===== MCD (Multi-Custom Domain) Tests =====
@@ -3271,6 +6315,49 @@ async def test_cache_config_validation():
         cache_max_entries=2
     ))
     assert client._cache_ttl == 0
+
+
+@pytest.mark.asyncio
+async def test_organization_id_with_allow_policy_raises_at_construction(httpx_mock: HTTPXMock):
+    """Test that organization_id with organization_policy='allow' raises ConfigurationError
+    at ApiClient construction time, before any request is made."""
+    with pytest.raises(ConfigurationError, match="organization_id is only valid when organization_policy is 'required'"):
+        ApiClient(ApiClientOptions(
+            domain="auth0.local",
+            audience="my-audience",
+            organization_policy="allow",
+            organization_id="org_abc123",
+        ))
+
+    assert_no_requests(httpx_mock)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("organization_id", [[], "", 123, [" "], [""], ["org_abc123", 5], ("org_abc123",)])
+async def test_organization_id_invalid_value_raises_at_construction(httpx_mock: HTTPXMock, organization_id):
+    """Test that an empty or non-string organization_id raises ConfigurationError at construction."""
+    with pytest.raises(ConfigurationError, match="organization_id must be a non-empty string or a non-empty list"):
+        ApiClient(ApiClientOptions(
+            domain="auth0.local",
+            audience="my-audience",
+            organization_policy="required",
+            organization_id=organization_id,
+        ))
+
+    assert_no_requests(httpx_mock)
+
+
+@pytest.mark.asyncio
+async def test_invalid_organization_policy_raises_at_construction(httpx_mock: HTTPXMock):
+    """Test that an organization_policy other than 'required' or 'allow' raises ConfigurationError."""
+    with pytest.raises(ConfigurationError, match="organization_policy must be either 'required' or 'allow'"):
+        ApiClient(ApiClientOptions(
+            domain="auth0.local",
+            audience="my-audience",
+            organization_policy="none",
+        ))
+
+    assert_no_requests(httpx_mock)
 
 
 @pytest.mark.asyncio
@@ -3511,8 +6598,8 @@ async def test_mcd_verify_rejects_symmetric_algorithm():
     # Encode header and payload (signature doesn't matter for this test)
     header_b64 = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip('=')
     payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip('=')
-    fake_signature = "fake_signature"
-    hs256_token = f"{header_b64}.{payload_b64}.{fake_signature}"
+    stub_signature = "stub_signature"
+    hs256_token = f"{header_b64}.{payload_b64}.{stub_signature}"
 
     api_client = ApiClient(ApiClientOptions(
         domains=["tenant1.auth0.com"],
@@ -3781,6 +6868,28 @@ async def test_mcd_discovery_missing_issuer_field(httpx_mock):
         await api_client.verify_access_token(token)
 
     assert "missing 'issuer' field" in str(err.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_mcd_discovery_fetch_failure_is_unavailable(httpx_mock):
+    """An allowed domain whose discovery cannot be fetched raises the 503 error."""
+    token = await generate_token(
+        domain="tenant1.auth0.com",
+        user_id="user123",
+        audience="my-audience",
+        issuer="https://tenant1.auth0.com/"
+    )
+    httpx_mock.add_exception(
+        httpx.ConnectError("boom"),
+        method="GET",
+        url="https://tenant1.auth0.com/.well-known/openid-configuration",
+    )
+    api_client = ApiClient(ApiClientOptions(domains=["tenant1.auth0.com"], audience="my-audience"))
+
+    with pytest.raises(AuthServerUnavailableError) as err:
+        await api_client.verify_access_token(token)
+
+    assert err.value.get_status_code() == 503
 
 
 @pytest.mark.asyncio
@@ -4433,3 +7542,4 @@ async def test_mcd_verify_request_with_resolver_context(httpx_mock):
     assert ctx["request_headers"]["authorization"] == f"Bearer {token}"
     assert ctx["request_headers"]["x-custom-header"] == "test-value"
     assert ctx["unverified_iss"] == "https://tenant1.auth0.com/"
+

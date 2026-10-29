@@ -3,6 +3,7 @@ Utility functions for OIDC discovery and JWKS fetching (asynchronously)
 using httpx or a custom fetch approach.
 """
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -82,6 +83,25 @@ def normalize_domain(domain: str) -> str:
     return f"https://{host}/"
 
 
+def is_auth_server_outage(error: Exception) -> bool:
+    """
+    Check whether a discovery or JWKS fetch error means the auth server is down or overloaded.
+
+    Args:
+        error: The exception raised while fetching.
+
+    Returns:
+        True for connection errors, timeouts, HTTP 5xx and HTTP 429. False for anything else.
+    """
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        return status >= 500 or status == 429
+    return isinstance(
+        error,
+        (httpx.NetworkError, httpx.TimeoutException, ConnectionError, TimeoutError, asyncio.TimeoutError),
+    )
+
+
 async def fetch_oidc_metadata(
     domain: str,
     custom_fetch: Optional[Callable[..., Any]] = None
@@ -147,7 +167,7 @@ def _decode_jwt_segment(token: Union[str, bytes], segment_index: int) -> dict:
         Decoded segment as dictionary
 
     Raises:
-        ValueError: If token format is invalid
+        ValueError: If token format is invalid, or the segment is not a JSON object or is nested too deeply
     """
     if isinstance(token, bytes):
         token = token.decode("utf-8")
@@ -161,7 +181,13 @@ def _decode_jwt_segment(token: Union[str, bytes], segment_index: int) -> dict:
     segment_b64 = fix_base64_padding(segment_b64)
 
     segment_data = base64.urlsafe_b64decode(segment_b64)
-    return json.loads(segment_data)
+    try:
+        segment = json.loads(segment_data)
+    except RecursionError:
+        raise ValueError("Invalid token format: segment is nested too deeply") from None
+    if not isinstance(segment, dict):
+        raise ValueError("Invalid token format: segment is not a JSON object")
+    return segment
 
 
 def get_unverified_header(token: Union[str, bytes]) -> dict:
@@ -173,6 +199,9 @@ def get_unverified_header(token: Union[str, bytes]) -> dict:
 
     Returns:
         Decoded header as dictionary
+
+    Raises:
+        ValueError: If the token is malformed or its header is not a JSON object or is nested too deeply
     """
     return _decode_jwt_segment(token, 0)
 
@@ -186,6 +215,9 @@ def get_unverified_payload(token: Union[str, bytes]) -> dict:
 
     Returns:
         Decoded payload (claims) as dictionary
+
+    Raises:
+        ValueError: If the token is malformed or its payload is not a JSON object or is nested too deeply
     """
     return _decode_jwt_segment(token, 1)
 

@@ -60,6 +60,133 @@ asyncio.run(exchange_on_behalf_of())
 In the current implementation, `get_token_on_behalf_of()` forwards the incoming access token as
 the [RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693#section-2.1) `subject_token` and relies on Auth0 to handle any DPoP-specific behavior for that token.
 
+### Caching the Exchanged Token
+
+To cache the exchanged token, pass a `token_store` when constructing `ApiClient`. Caching activates automatically once a store is configured. The SDK builds the cache key from the verified `sub` and `iss` claims. Pass the token you already verified as `verified` so it is not verified a second time, otherwise `get_token_on_behalf_of()` verifies it before the cache lookup.
+
+```python
+from auth0_api_python import ApiClient, ApiClientOptions, VerifiedToken
+
+# token_store is your AbstractTokenStore implementation (e.g. Redis-backed).
+# See docs/TokenStorage.md for how to build one.
+api_client = ApiClient(ApiClientOptions(
+    domain="your-tenant.auth0.com",
+    audience="https://mcp-server.example.com",
+    client_id="<AUTH0_CLIENT_ID>",
+    client_secret="<AUTH0_CLIENT_SECRET>",
+    token_store=your_token_store,
+))
+
+claims = await api_client.verify_access_token(access_token=incoming_access_token)
+
+result = await api_client.get_token_on_behalf_of(
+    access_token=incoming_access_token,
+    audience="https://calendar-api.example.com",
+    scope="calendar:read calendar:write",
+    verified=VerifiedToken(access_token=incoming_access_token, claims=claims),
+)
+```
+
+See the **[Token Storage Guide](docs/TokenStorage.md)** for a full working example, how to
+implement a Redis-backed store, and the built-in encryption helpers.
+
+## Client Credentials for Server-to-Server Calls
+
+Use `get_client_credentials_token()` to obtain an M2M access token for server-to-server calls
+using the OAuth 2.0 client credentials grant. The SDK authenticates via HTTP Basic and caches
+the result in the configured `token_store` (keyed by audience and scope set) so subsequent calls
+within the token's lifetime skip the network round-trip.
+
+```python
+import httpx
+
+from auth0_api_python import ApiClient, ApiClientOptions
+
+api_client = ApiClient(ApiClientOptions(
+    domain="your-tenant.auth0.com",
+    audience="https://mcp-server.example.com",
+    client_id="<AUTH0_CLIENT_ID>",
+    client_secret="<AUTH0_CLIENT_SECRET>",
+))
+
+result = await api_client.get_client_credentials_token(
+    audience="https://downstream-api.example.com",
+    scope="read:data",
+)
+
+# result always has "access_token", "expires_in", "expires_at".
+# "scope" is not guaranteed in the response and may be absent.
+async with httpx.AsyncClient() as client:
+    response = await client.get(
+        "https://downstream-api.example.com/data",
+        headers={"Authorization": f"Bearer {result['access_token']}"},
+    )
+```
+
+More info: [Client Credentials Flow](https://auth0.com/docs/get-started/authentication-and-authorization-flow/client-credentials-flow)
+
+## Access Token for a Connection (Token Vault)
+
+`get_access_token_for_connection()` exchanges the user's Auth0 access token for a token from a federated identity provider (such as Google) via Auth0's Token Vault.
+
+Three things must exist on your Auth0 tenant before this works. The Token Vault grant must be enabled on your application, which must be a confidential (resource-server) client. The connection (for example `google-oauth2`) must be configured and enabled on that application. The user must have linked their account through Auth0's Connected Accounts flow. See the [Token Vault setup guide](https://auth0.com/docs/secure/tokens/token-vault/configure-token-vault) for the application setup and the [Connected Accounts guide](https://auth0.com/docs/secure/tokens/token-vault/connected-accounts-for-token-vault) for the user-linking step.
+
+### Basic call
+
+```python
+import httpx
+
+from auth0_api_python import ApiClient, ApiClientOptions
+
+api_client = ApiClient(ApiClientOptions(
+    domain="your-tenant.auth0.com",
+    audience="https://mcp-server.example.com",
+    client_id="<AUTH0_CLIENT_ID>",
+    client_secret="<AUTH0_CLIENT_SECRET>",
+))
+
+incoming_access_token = "incoming-auth0-access-token"
+
+result = await api_client.get_access_token_for_connection({
+    "connection": "google-oauth2",
+    "access_token": incoming_access_token,
+})
+
+async with httpx.AsyncClient() as client:
+    response = await client.get(
+        "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+        headers={"Authorization": f"Bearer {result['access_token']}"},
+    )
+```
+
+### With caching
+
+Pass a `token_store` to cache the connection token. The SDK caches by `sub` (caller), `connection` and `login_hint`, skipping the exchange on repeat calls for the same user, provider and linked account. Pass `verified=` with a `VerifiedToken` built from the `verify_access_token()` claims to reuse that verification rather than running it again inside the exchange.
+
+```python
+from auth0_api_python import ApiClient, ApiClientOptions, VerifiedToken
+
+# token_store is your AbstractTokenStore implementation.
+# See docs/TokenStorage.md for how to build one and for encryption details.
+api_client = ApiClient(ApiClientOptions(
+    domain="your-tenant.auth0.com",
+    audience="https://mcp-server.example.com",
+    client_id="<AUTH0_CLIENT_ID>",
+    client_secret="<AUTH0_CLIENT_SECRET>",
+    token_store=your_token_store,
+))
+
+incoming_access_token = "incoming-auth0-access-token"
+
+# Verify once, then pass the result to avoid a second verification inside the exchange.
+claims = await api_client.verify_access_token(access_token=incoming_access_token)
+
+result = await api_client.get_access_token_for_connection(
+    {"connection": "google-oauth2", "access_token": incoming_access_token},
+    verified=VerifiedToken(access_token=incoming_access_token, claims=claims),
+)
+```
+
 ## Inspecting Delegation After Token Verification
 
 When a downstream API or `MCP` server receives an access token that may have been issued through
@@ -179,6 +306,23 @@ headers = {"authorization": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."}
 result = asyncio.run(validate_request(headers))
 ```
 
+### Telling an Outage from an Invalid Token
+
+`AuthServerUnavailableError` is raised when the discovery document or JWKS cannot be reached. It subclasses `VerifyAccessTokenError`, so catch it first to answer `503` instead of `401`.
+
+```python
+from auth0_api_python import ApiClient, AuthServerUnavailableError, VerifyAccessTokenError
+
+async def validate_token(api_client: ApiClient, token: str):
+    try:
+        claims = await api_client.verify_access_token(token)
+        return {"success": True, "user": claims["sub"]}
+    except AuthServerUnavailableError as e:
+        return {"error": e.get_error_code()}, e.get_status_code()  # 503, retry later
+    except VerifyAccessTokenError as e:
+        return {"error": e.get_error_code()}, e.get_status_code()  # 401, token rejected
+```
+
 
 ## DPoP Authentication 
 
@@ -273,3 +417,74 @@ async def verify_dpop_token(access_token, dpop_proof, http_method, http_url):
         "proof_claims": proof_claims
     }
 ```
+
+## Anonymous Callers
+
+Anonymous Sessions give a visitor an Auth0 identity before they log in. The access token issued for an anonymous session is a standard Auth0 Bearer JWT, so this SDK validates it like any other token. The one difference is the `sub` claim, which starts with `anon@`.
+
+An anonymous token is verified like any other. It must be issued for this API's audience. To treat anonymous callers differently, or block them, check the `sub` claim after verifying the token. The SDK does not make that authorization decision for you.
+
+### Serve everyone, branch in the handler
+
+```python
+from auth0_api_python import ApiClient, ApiClientOptions
+
+async def handle_cart(headers):
+    api_client = ApiClient(ApiClientOptions(
+        domain="your-tenant.auth0.com",
+        audience="https://api.example.com"
+    ))
+
+    claims = await api_client.verify_request(headers=headers)
+    is_anonymous = claims.get("sub", "").startswith("anon@")
+
+    if is_anonymous:
+        return {"cart": load_guest_cart(claims["sub"])}
+    return {"cart": load_user_cart(claims["sub"])}
+```
+
+> [!NOTE]
+> These snippets construct `ApiClient` inside the handler for clarity. In production, build it once at startup and reuse it, or pass a shared `cache_adapter`, so JWKS and discovery caches persist across requests.
+
+### Block anonymous callers on a specific route
+
+```python
+from auth0_api_python import ApiClient, ApiClientOptions
+
+async def handle_checkout(headers):
+    api_client = ApiClient(ApiClientOptions(
+        domain="your-tenant.auth0.com",
+        audience="https://api.example.com"
+    ))
+
+    claims = await api_client.verify_request(headers=headers)
+    if claims.get("sub", "").startswith("anon@"):
+        raise PermissionError("Anonymous callers are not allowed on this route")
+
+    return {"order": create_order(claims["sub"])}
+```
+
+> [!NOTE]
+> Blocking an anonymous caller should return an HTTP `403 Forbidden`. Replace `PermissionError` with your framework's error type.
+
+### Block anonymous callers everywhere
+
+The SDK has no global "reject anonymous" switch. Centralize the check in whatever shared layer your framework uses for auth (middleware, a FastAPI dependency, a decorator).
+
+```python
+from auth0_api_python import ApiClient, ApiClientOptions
+
+async def require_logged_in_user(headers):
+    api_client = ApiClient(ApiClientOptions(
+        domain="your-tenant.auth0.com",
+        audience="https://api.example.com"
+    ))
+
+    claims = await api_client.verify_request(headers=headers)
+    if claims.get("sub", "").startswith("anon@"):
+        raise PermissionError("Anonymous callers are not allowed")
+    return claims
+```
+
+> [!NOTE]
+> The `anon@` prefix on `sub` is the only signal that distinguishes an anonymous caller from a logged-in user.

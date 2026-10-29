@@ -1,5 +1,8 @@
 import time
 
+import pytest
+
+from auth0_api_python._internal.cache_expiry import is_fresh
 from auth0_api_python.cache import InMemoryCache
 
 # ===== InMemoryCache Basic Operations =====
@@ -168,5 +171,12 @@ def test_in_memory_cache_lru_access_order():
     assert cache.get("key4") == "value4"
 
 
+# ===== Expiry Buffer =====
 
 
+@pytest.mark.parametrize(("seconds_left", "expected"), [(29, False), (30, False), (31, True)])
+def test_is_fresh_requires_more_than_the_buffer(seconds_left, expected):
+    """An entry is fresh only with more than 30 seconds left."""
+    now = 1_700_000_000
+
+    assert is_fresh(now + seconds_left, now) is expected
