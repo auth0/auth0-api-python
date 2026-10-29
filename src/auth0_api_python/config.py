@@ -47,6 +47,7 @@ class ApiClientOptions:
                         match. "non_strict" reuses any cached token whose granted scopes cover
                         the request, and requires a token_store subclassing IndexedTokenStore
                         (raises ConfigurationError at construction without one).
+        client_info: Name, version and optional env of a wrapper SDK built on this one, as a dict with "name" and "version" keys and an optional "env" dict. Sent in the Auth0-Client header.
     """
     def __init__(
             self,
@@ -68,6 +69,7 @@ class ApiClientOptions:
             organization_policy: Literal["required", "allow"] = "allow",
             organization_id: Optional[Union[str, list[str]]] = None,
             scope_matching: str = "strict",
+            client_info: Optional[dict] = None,
     ):
         self.domain = domain
         self.domains = domains
@@ -87,3 +89,4 @@ class ApiClientOptions:
         self.organization_policy = organization_policy
         self.organization_id = organization_id
         self.scope_matching = scope_matching
+        self.client_info = client_info
