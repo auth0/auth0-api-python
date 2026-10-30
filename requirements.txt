@@ -2,6 +2,7 @@
 # Source of truth for dependencies: pyproject.toml + poetry.lock
 
 authlib>=1.6.12
+joserfc>=1.6.8,<2.0; python_version >= "3.10"
 httpx>=0.28.1
 ada-url>=1.32.0; python_version >= "3.10"
 ada-url>=1.27.0; python_version < "3.10"
