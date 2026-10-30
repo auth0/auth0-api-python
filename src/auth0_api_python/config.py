@@ -20,7 +20,6 @@ class ApiClientOptions:
                  Can be a static list of domain strings or a callable that returns
                  allowed domains dynamically. Optional if domain is provided.
         audience: The expected 'aud' claim in the token.
-        jwt_algorithms: Allowed access-token signing algorithms (default: ["RS256"]).
         custom_fetch: Optional callable that can replace the default HTTP fetch logic.
         cache_adapter: Custom cache implementation. If not provided, uses default InMemoryCache.
         token_store: Custom token storage for token caching. If not provided, caching is disabled and every exchange makes a fresh network call.
@@ -48,6 +47,9 @@ class ApiClientOptions:
                         match. "non_strict" reuses any cached token whose granted scopes cover
                         the request, and requires a token_store subclassing IndexedTokenStore
                         (raises ConfigurationError at construction without one).
+        jwt_algorithms: Non-empty list of supported asymmetric JWT signing algorithms.
+                        Defaults to ["RS256"]; unknown, symmetric, and unsigned algorithms
+                        raise ConfigurationError at ApiClient construction.
     """
     def __init__(
             self,
