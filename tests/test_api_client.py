@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import time
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -40,6 +41,7 @@ from auth0_api_python._internal.cache_keys import (
     token_vault_cache_key,
 )
 from auth0_api_python.api_client import MAX_ARRAY_VALUES_PER_KEY, ApiClient
+from auth0_api_python._internal.jose_compat import USE_LEGACY_JOSE
 from auth0_api_python.config import ApiClientOptions
 from auth0_api_python.errors import (
     ApiError,
@@ -86,20 +88,130 @@ async def test_init_missing_args():
         _ = ApiClient(ApiClientOptions(domain="example.us.auth0.com", audience=""))
 
 
-def test_custom_jwt_algorithms():
+def test_custom_jwt_algorithms_are_copied():
+    algorithms = ["RS384", "RS512"]
     client = ApiClient(ApiClientOptions(
         domain="example.us.auth0.com",
         audience="my-audience",
-        jwt_algorithms=["RS384", "RS512"],
+        jwt_algorithms=algorithms,
     ))
     assert client._jwt_algorithms == ["RS384", "RS512"]
+    algorithms.append("RS256")
+    assert client._jwt_algorithms == ["RS384", "RS512"]
 
+
+@pytest.mark.parametrize("algorithms", [
+    [], (), "RS256", [None], [""], [" "], ["FOO"],
+    ["none"], ["RS256", "none"], ["HS256"], ["RS256", 7],
+])
+def test_reject_invalid_jwt_algorithms(algorithms):
     with pytest.raises(ConfigurationError):
         ApiClient(ApiClientOptions(
             domain="example.us.auth0.com",
             audience="my-audience",
-            jwt_algorithms=[],
+            jwt_algorithms=algorithms,
         ))
+
+
+@pytest.mark.asyncio
+async def test_verify_access_token_rs384_requires_explicit_configuration(httpx_mock: HTTPXMock):
+    """A genuine RS384 signature is rejected by default, accepted when enabled."""
+    token = await generate_token(
+        domain="auth0.local", user_id="user_123",
+        audience="my-audience", algorithm="RS384",
+    )
+    httpx_mock.add_response(
+        method="GET", url=DISCOVERY_URL,
+        json={"issuer": "https://auth0.local/", "jwks_uri": JWKS_URL},
+    )
+    # A key without an 'alg' restriction may verify another RS* algorithm.
+    jwks_key = {key: value for key, value in PUBLIC_RSA_JWK.items() if key != "alg"}
+    httpx_mock.add_response(method="GET", url=JWKS_URL, json={"keys": [jwks_key]})
+    default_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
+    with pytest.raises(VerifyAccessTokenError, match="not allowed"):
+        await default_client.verify_access_token(token)
+
+    configured = ApiClient(ApiClientOptions(
+        domain="auth0.local", audience="my-audience", jwt_algorithms=["RS384"],
+    ))
+    claims = await configured.verify_access_token(token)
+    assert isinstance(claims, dict)
+    assert claims["sub"] == "user_123"
+
+
+@pytest.mark.asyncio
+async def test_verify_access_token_rejects_conflicting_jwks_key_algorithm(httpx_mock: HTTPXMock):
+    """Both Python JOSE backends enforce JWK algorithm restrictions."""
+    token = await generate_token(
+        domain="auth0.local", user_id="user_123",
+        audience="my-audience", algorithm="RS384",
+    )
+    httpx_mock.add_response(
+        method="GET", url=DISCOVERY_URL,
+        json={"issuer": "https://auth0.local/", "jwks_uri": JWKS_URL},
+    )
+    httpx_mock.add_response(method="GET", url=JWKS_URL, json={"keys": [PUBLIC_RSA_JWK]})
+    client = ApiClient(ApiClientOptions(
+        domain="auth0.local", audience="my-audience", jwt_algorithms=["RS384"],
+    ))
+    with pytest.raises(VerifyAccessTokenError, match="JWKS key algorithm"):
+        await client.verify_access_token(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key_changes", [
+    {"n": None},
+    {"key_ops": ["encrypt"]},
+])
+async def test_verify_access_token_bad_jwks_key_raises_sdk_error(httpx_mock: HTTPXMock, key_changes):
+    """Malformed or unusable JWKS material never leaks a JOSE exception."""
+    token = await generate_token(domain="auth0.local", user_id="user_123", audience="my-audience")
+    httpx_mock.add_response(
+        method="GET", url=DISCOVERY_URL,
+        json={"issuer": "https://auth0.local/", "jwks_uri": JWKS_URL},
+    )
+    bad_key = {**PUBLIC_RSA_JWK, **key_changes}
+    if bad_key.get("n") is None:
+        bad_key.pop("n", None)
+    httpx_mock.add_response(method="GET", url=JWKS_URL, json={"keys": [bad_key]})
+    client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
+    with pytest.raises(VerifyAccessTokenError):
+        await client.verify_access_token(token)
+
+
+@pytest.mark.asyncio
+async def test_unsigned_jwt_is_never_supported():
+    """The none algorithm must be rejected even before a JWKS lookup."""
+    client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
+    unsigned = unsigned_jwt(
+        {"alg": "none", "kid": "TEST_KEY"},
+        {"iss": "https://auth0.local/", "aud": "my-audience"},
+    )
+    with pytest.raises(VerifyAccessTokenError, match="not allowed"):
+        await client.verify_access_token(unsigned)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [5, None, True, "not-an-object"])
+async def test_verify_dpop_proof_rejects_non_object_decoded_payload(payload, monkeypatch):
+    """A decoded non-object must be reported as InvalidDpopProofError, not TypeError."""
+    token = "test_token"
+    proof = await generate_dpop_proof(
+        access_token=token, http_method="GET", http_url="https://api.example.com/resource",
+    )
+    client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
+    if USE_LEGACY_JOSE:
+        monkeypatch.setattr(client._dpop_jwt, "decode", lambda *_args, **_kwargs: payload)
+    else:
+        monkeypatch.setattr(
+            "auth0_api_python.api_client.jwt.decode",
+            lambda *_args, **_kwargs: SimpleNamespace(claims=payload),
+        )
+    with pytest.raises(InvalidDpopProofError, match="JSON object"):
+        await client.verify_dpop_proof(
+            access_token=token, proof=proof,
+            http_method="GET", http_url="https://api.example.com/resource",
+        )
 
 
 @pytest.mark.asyncio
