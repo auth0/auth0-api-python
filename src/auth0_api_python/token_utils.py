@@ -1,17 +1,17 @@
-import sys
+import base64
+import json
 import time
 import uuid
 from typing import Any, Optional, Union
 
+from ._internal.jose_compat import USE_LEGACY_JOSE
 from .utils import calculate_jwk_thumbprint, normalize_url_for_htu, sha256_base64url
 
 # Python 3.9 resolves to Authlib 1.6 (without joserfc); use its JOSE API there.
-if sys.version_info < (3, 10):
+if USE_LEGACY_JOSE:
     from authlib.jose import JsonWebKey, jwt
 else:
     from joserfc import jwk, jwt
-    from joserfc.jws import JWSRegistry
-    from joserfc.registry import HeaderParameter
 
 # A private RSA JWK for test usage.
 
@@ -40,9 +40,10 @@ async def generate_token(
     exp: bool = True,
     claims: Optional[dict[str, Any]] = None,
     expiration_time: int = 3600,
+    algorithm: str = "RS256",
 ) -> str:
     """
-    Generates a real RS256-signed JWT using the private key above.
+    Generates a signed JWT using the private key above.
 
     Args:
         domain: The Auth0 domain (used if issuer is not False).
@@ -56,9 +57,10 @@ async def generate_token(
         exp: Whether to set the 'exp' claim. If False, skip it.
         claims: Additional custom claims to merge into the token.
         expiration_time: If exp is True, how many seconds from now until expiration.
+        algorithm: Signing algorithm (default RS256); tests may use RS384, for example.
 
     Returns:
-        A RS256-signed JWT string.
+        A signed JWT string.
 
     Example usage:
         token = generate_token(
@@ -87,12 +89,13 @@ async def generate_token(
         token_claims["aud"] = audience
 
 
-    if sys.version_info < (3, 10):
-        key = JsonWebKey.import_key(PRIVATE_JWK)
+    key_data = {**PRIVATE_JWK, "alg": algorithm}
+    if USE_LEGACY_JOSE:
+        key = JsonWebKey.import_key(key_data)
     else:
-        key = jwk.import_key(PRIVATE_JWK)
+        key = jwk.import_key(key_data)
 
-    header = {"alg": "RS256", "kid": PRIVATE_JWK["kid"]}
+    header = {"alg": algorithm, "kid": PRIVATE_JWK["kid"]}
     token = jwt.encode(header, token_claims, key)
     # Ensure we return a string, not bytes
     return token.decode('utf-8') if isinstance(token, bytes) else token
@@ -173,24 +176,25 @@ async def generate_dpop_proof(
     }
 
 
-    if header_overrides:
-        header.update(header_overrides)
-
-    if sys.version_info < (3, 10):
+    if USE_LEGACY_JOSE:
         key = JsonWebKey.import_key(PRIVATE_EC_JWK)
-        token = jwt.encode(header, proof_claims, key)
     else:
         key = jwk.import_key(PRIVATE_EC_JWK)
-        registry = JWSRegistry(
-            header_registry={
-                name: HeaderParameter("test override", lambda _: None)
-                for name in ("typ", "jwk")
-                if name in (header_overrides or {})
-            }
-        )
-        token = jwt.encode(header, proof_claims, key, registry=registry)
-    # Ensure we return a string, not bytes
-    return token.decode('utf-8') if isinstance(token, bytes) else token
+
+    # Sign a valid proof first. Malformed-header fixtures are intentionally
+    # tampered *after* signing so no production registry overrides are needed.
+    token = jwt.encode(header, proof_claims, key)
+    token = token.decode("utf-8") if isinstance(token, bytes) else token
+    if header_overrides:
+        protected, payload, signature = token.split(".")
+        padded = protected + "=" * (-len(protected) % 4)
+        modified_header = json.loads(base64.urlsafe_b64decode(padded))
+        modified_header.update(header_overrides)
+        protected = base64.urlsafe_b64encode(
+            json.dumps(modified_header, separators=(",", ":")).encode("utf-8")
+        ).decode("ascii").rstrip("=")
+        token = f"{protected}.{payload}.{signature}"
+    return token
 
 
 async def generate_token_with_cnf(
