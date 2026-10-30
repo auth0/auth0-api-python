@@ -47,6 +47,9 @@ class ApiClientOptions:
                         match. "non_strict" reuses any cached token whose granted scopes cover
                         the request, and requires a token_store subclassing IndexedTokenStore
                         (raises ConfigurationError at construction without one).
+        jwt_algorithms: Non-empty list of supported asymmetric JWT signing algorithms.
+                        Defaults to ["RS256"]; unknown, symmetric, and unsigned algorithms
+                        raise ConfigurationError at ApiClient construction.
     """
     def __init__(
             self,
@@ -68,10 +71,12 @@ class ApiClientOptions:
             organization_policy: Literal["required", "allow"] = "allow",
             organization_id: Optional[Union[str, list[str]]] = None,
             scope_matching: str = "strict",
+            jwt_algorithms: Optional[list[str]] = None,
     ):
         self.domain = domain
         self.domains = domains
         self.audience = audience
+        self.jwt_algorithms = ["RS256"] if jwt_algorithms is None else jwt_algorithms
         self.custom_fetch = custom_fetch
         self.cache_adapter = cache_adapter
         self.token_store = token_store
