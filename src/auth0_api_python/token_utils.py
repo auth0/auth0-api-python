@@ -7,7 +7,8 @@ from typing import Any, Optional, Union
 from ._internal.jose_compat import USE_LEGACY_JOSE
 from .utils import calculate_jwk_thumbprint, normalize_url_for_htu, sha256_base64url
 
-# Python 3.9 resolves to Authlib 1.6 (without joserfc); use its JOSE API there.
+# Python 3.9 resolves to Authlib 1.6 without joserfc.
+# Use the legacy Authlib JOSE API on that runtime.
 if USE_LEGACY_JOSE:
     from authlib.jose import JsonWebKey, jwt
 else:
