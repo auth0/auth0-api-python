@@ -1,10 +1,10 @@
 # Testing
 
 - **Framework:** pytest, with pytest-asyncio, pytest-httpx, pytest-mock, freezegun (versions in `pyproject.toml` dev group)
-- **Location:** `tests/`, one `test_<module>.py` per source module
+- **Location:** `tests/`, grouped by area (`test_api_client.py`, `test_cache.py`, `test_utils.py`, `test_act.py`, `test_token_store.py`), not one file per source module
 - **Coverage:** pytest-cov. `pyproject.toml` `addopts` always applies `--cov=src --cov-report=term-missing:skip-covered --cov-report=xml`. No minimum threshold is configured.
 
-The default `poetry run pytest` suite needs no credentials. All Auth0 HTTP calls go through `httpx_mock` against `https://auth0.local`.
+The default `poetry run pytest` suite needs no credentials. All Auth0 HTTP calls go through `httpx_mock`. Fixtures use `https://auth0.local`, and `test_api_client.py` also uses `tenant1.auth0.com`.
 
 ## Running tests
 

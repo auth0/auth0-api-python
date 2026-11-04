@@ -10,7 +10,7 @@ poetry install --no-interaction
 # Run all unit tests (CI command)
 poetry run pytest -v --cov=src --cov-report=term-missing --cov-report=xml
 
-# Run all unit tests (short form; pyproject addopts already adds --cov=src)
+# Run all unit tests (short form, pyproject addopts already adds --cov=src)
 poetry run pytest
 
 # Fast loop without coverage
