@@ -1,5 +1,5 @@
 """
-Client telemetry headers sent on every request this SDK makes to Auth0.
+Client telemetry headers sent on requests this SDK makes to Auth0 with its default HTTP client.
 """
 
 import base64

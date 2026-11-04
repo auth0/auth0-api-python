@@ -17,7 +17,7 @@ from conftest import (
     assert_api_error,
     assert_form_post,
     assert_no_requests,
-    auth0_client_payload,
+    assert_telemetry_headers,
     last_form,
     token_success,
     unsigned_jwt,
@@ -653,8 +653,8 @@ async def test_discovery_and_jwks_requests_send_telemetry_header(httpx_mock: HTT
     await api_client.verify_access_token(access_token)
 
     discovery, jwks = httpx_mock.get_requests()
-    assert auth0_client_payload(discovery)["name"] == "auth0-api-python"
-    assert auth0_client_payload(jwks)["name"] == "auth0-api-python"
+    assert_telemetry_headers(discovery)
+    assert_telemetry_headers(jwks)
 
 
 @pytest.mark.asyncio
@@ -686,6 +686,36 @@ async def test_verify_access_token_custom_fetch_non_network_error_stays_invalid_
 
     assert not isinstance(err.value, AuthServerUnavailableError)
     assert err.value.get_status_code() == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrap", [True, False], ids=["response-object", "plain-dict"])
+async def test_custom_fetch_gets_url_only_and_token_requests_keep_telemetry(wrap, httpx_mock: HTTPXMock):
+    """custom_fetch serves discovery and JWKS with the URL only, while token requests still send telemetry."""
+    calls = []
+    metadata = {"issuer": "https://auth0.local/", "jwks_uri": JWKS_URL, "token_endpoint": TOKEN_ENDPOINT}
+
+    async def fetch(url):  # no **kwargs, so a headers argument would raise TypeError
+        calls.append(url)
+        body = metadata if url == DISCOVERY_URL else {"keys": [PUBLIC_RSA_JWK]}
+        return httpx.Response(200, json=body) if wrap else body
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        custom_fetch=fetch,
+    ))
+    access_token = await generate_token(domain="auth0.local", user_id="user_123", audience="my-audience")
+
+    claims = await api_client.verify_access_token(access_token)
+    assert claims["sub"] == "user_123"
+    assert calls == [DISCOVERY_URL, JWKS_URL]
+
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success())
+    await api_client.get_client_credentials_token(audience="https://billing-api.example.com")
+    assert_telemetry_headers(httpx_mock.get_requests()[-1])
 
 
 @pytest.mark.asyncio
@@ -2726,7 +2756,7 @@ async def test_get_access_token_for_connection_sends_telemetry_header(mock_disco
         "access_token": "user-token"
     })
 
-    assert auth0_client_payload(httpx_mock.get_requests()[-1])["name"] == "auth0-api-python"
+    assert_telemetry_headers(httpx_mock.get_requests()[-1])
 
 
 @pytest.mark.asyncio
@@ -3073,7 +3103,7 @@ async def test_get_token_by_exchange_profile_sends_telemetry_header(mock_discove
         audience="https://api.example.com",
     )
 
-    assert auth0_client_payload(httpx_mock.get_requests()[-1])["name"] == "auth0-api-python"
+    assert_telemetry_headers(httpx_mock.get_requests()[-1])
 
 
 @freeze_time("2025-01-01T00:00:00Z")
@@ -3885,7 +3915,7 @@ async def test_get_token_on_behalf_of_sends_telemetry_header(mock_discovery, api
         audience="https://api.backend.com",
     )
 
-    assert auth0_client_payload(httpx_mock.get_requests()[-1])["name"] == "auth0-api-python"
+    assert_telemetry_headers(httpx_mock.get_requests()[-1])
 
 
 @pytest.mark.asyncio
@@ -4064,7 +4094,7 @@ async def test_get_client_credentials_token_sends_telemetry_header(mock_discover
 
     await api_client_confidential.get_client_credentials_token(audience="https://billing-api.example.com")
 
-    assert auth0_client_payload(httpx_mock.get_requests()[-1])["name"] == "auth0-api-python"
+    assert_telemetry_headers(httpx_mock.get_requests()[-1])
 
 
 @pytest.mark.asyncio

@@ -223,6 +223,12 @@ def auth0_client_payload(request) -> dict:
     return json.loads(base64.b64decode(request.headers["Auth0-Client"]))
 
 
+def assert_telemetry_headers(request, name: str = "auth0-api-python"):
+    """Assert a recorded request carries both telemetry headers."""
+    assert auth0_client_payload(request)["name"] == name
+    assert request.headers["User-Agent"].startswith("Python/")
+
+
 def assert_form_post(
     httpx_mock: HTTPXMock,
     *,
