@@ -32,3 +32,8 @@ coverage.xml
 # Sphinx
 sphinx/_build/
 sphinx/autoapi/
+
+# Only the page JSON is committed. Everything else Sphinx writes there is not.
+sphinx/json/*
+!sphinx/json/autoapi
+!sphinx/json/index.fjson
