@@ -31,6 +31,7 @@ from .errors import (
     OrganizationNotAllowedError,
     VerifyAccessTokenError,
 )
+from .telemetry import build_telemetry_headers, validate_client_info
 from .token_store import (
     IndexedTokenStore,
     VerifiedToken,
@@ -113,6 +114,13 @@ class ApiClient:
                 "The 'domain' parameter is required when 'client_id' is configured."
             )
         self.options = options
+
+        if options.client_info is not None:
+            try:
+                validate_client_info(options.client_info)
+            except ValueError as e:
+                raise ConfigurationError(str(e)) from e
+        self._telemetry_headers = build_telemetry_headers(options.client_info)
 
         # Validate cache configuration
         if not isinstance(options.cache_ttl_seconds, (int, float)) or options.cache_ttl_seconds < 0:
@@ -855,7 +863,8 @@ class ApiClient:
                 response = await client.post(
                     token_endpoint,
                     data=params,
-                    auth=(client_id, client_secret)
+                    auth=(client_id, client_secret),
+                    headers=self._telemetry_headers
                 )
 
                 if response.status_code != 200:
@@ -1033,7 +1042,8 @@ class ApiClient:
                 response = await client.post(
                     token_endpoint,
                     data=params,
-                    auth=(client_id, client_secret)
+                    auth=(client_id, client_secret),
+                    headers=self._telemetry_headers
                 )
 
                 if response.status_code != 200:
@@ -1287,7 +1297,8 @@ class ApiClient:
                 response = await client.post(
                     token_endpoint,
                     data=params,
-                    auth=(client_id, client_secret)
+                    auth=(client_id, client_secret),
+                    headers=self._telemetry_headers
                 )
 
                 if response.status_code != 200:
@@ -1431,7 +1442,8 @@ class ApiClient:
 
         metadata, max_age = await fetch_oidc_metadata(
             domain=domain,
-            custom_fetch=self.options.custom_fetch
+            custom_fetch=self.options.custom_fetch,
+            headers=self._telemetry_headers
         )
 
         effective_ttl = self._cache_ttl
@@ -1462,7 +1474,8 @@ class ApiClient:
 
         jwks_data, max_age = await fetch_jwks(
             jwks_uri=jwks_uri,
-            custom_fetch=self.options.custom_fetch
+            custom_fetch=self.options.custom_fetch,
+            headers=self._telemetry_headers
         )
 
         effective_ttl = self._cache_ttl

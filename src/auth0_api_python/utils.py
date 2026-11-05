@@ -104,10 +104,16 @@ def is_auth_server_outage(error: Exception) -> bool:
 
 async def fetch_oidc_metadata(
     domain: str,
-    custom_fetch: Optional[Callable[..., Any]] = None
+    custom_fetch: Optional[Callable[..., Any]] = None,
+    headers: Optional[dict[str, str]] = None
 ) -> tuple[dict[str, Any], Optional[int]]:
     """
     Asynchronously fetch the OIDC config from https://{domain}/.well-known/openid-configuration.
+
+    Args:
+        domain: The Auth0 domain.
+        custom_fetch: Optional callable that replaces the default HTTP fetch.
+        headers: Headers for the default HTTP client. Not applied when custom_fetch is set.
 
     Returns:
         Tuple of (metadata_dict, max_age_or_none). max_age is parsed from
@@ -123,7 +129,7 @@ async def fetch_oidc_metadata(
         return response, None
     else:
         async with httpx.AsyncClient() as client:
-            resp = await client.get(url)
+            resp = await client.get(url, headers=headers)
             resp.raise_for_status()
             max_age = parse_cache_control_max_age(resp.headers)
             return resp.json(), max_age
@@ -131,10 +137,16 @@ async def fetch_oidc_metadata(
 
 async def fetch_jwks(
     jwks_uri: str,
-    custom_fetch: Optional[Callable[..., Any]] = None
+    custom_fetch: Optional[Callable[..., Any]] = None,
+    headers: Optional[dict[str, str]] = None
 ) -> tuple[dict[str, Any], Optional[int]]:
     """
     Asynchronously fetch the JSON Web Key Set from jwks_uri.
+
+    Args:
+        jwks_uri: The JWKS endpoint URL.
+        custom_fetch: Optional callable that replaces the default HTTP fetch.
+        headers: Headers for the default HTTP client. Not applied when custom_fetch is set.
 
     Returns:
         Tuple of (jwks_dict, max_age_or_none). max_age is parsed from
@@ -149,7 +161,7 @@ async def fetch_jwks(
         return response, None
     else:
         async with httpx.AsyncClient() as client:
-            resp = await client.get(jwks_uri)
+            resp = await client.get(jwks_uri, headers=headers)
             resp.raise_for_status()
             max_age = parse_cache_control_max_age(resp.headers)
             return resp.json(), max_age
