@@ -121,6 +121,7 @@ async def main():
     connection = "my-connection" # The Auth0 connection to the upstream idp
     access_token = "..." # The Auth0 access token to exchange
 
+    await api_client.verify_access_token(access_token) # Verify first so the organization policy applies
     connection_access_token = await api_client.get_access_token_for_connection({"connection": connection, "access_token": access_token})
     # The returned token is the access token for the upstream idp
     print(connection_access_token)
@@ -460,6 +461,18 @@ claims = await api_client.verify_access_token(access_token)
 ```
 
 See the **[Organization Policy Guide](docs/OrganizationPolicy.md)** for policy modes, the allowlist, and error handling.
+
+### 10. Client Telemetry
+
+The SDK sends an `Auth0-Client` header and a `User-Agent` header (`Python/<version>`) on the requests it makes to Auth0 with its default HTTP client. Requests served by `custom_fetch` do not carry them. If you build a wrapper SDK on top of this one, pass `client_info` so the header names your SDK. An invalid `client_info` raises `ConfigurationError` when the client is created.
+
+```python
+api_client = ApiClient(ApiClientOptions(
+    domain="<AUTH0_DOMAIN>",
+    audience="<AUTH0_AUDIENCE>",
+    client_info={"name": "my-wrapper-sdk", "version": "1.2.3", "env": {"my-framework": "4.5.6"}},
+))
+```
 
 ## Feedback
 

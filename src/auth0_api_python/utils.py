@@ -104,10 +104,16 @@ def is_auth_server_outage(error: Exception) -> bool:
 
 async def fetch_oidc_metadata(
     domain: str,
-    custom_fetch: Optional[Callable[..., Any]] = None
+    custom_fetch: Optional[Callable[..., Any]] = None,
+    headers: Optional[dict[str, str]] = None
 ) -> tuple[dict[str, Any], Optional[int]]:
     """
     Asynchronously fetch the OIDC config from https://{domain}/.well-known/openid-configuration.
+
+    Args:
+        domain: The Auth0 domain.
+        custom_fetch: Optional callable that replaces the default HTTP fetch.
+        headers: Headers for the default HTTP client. Not applied when custom_fetch is set.
 
     Returns:
         Tuple of (metadata_dict, max_age_or_none). max_age is parsed from
@@ -123,7 +129,7 @@ async def fetch_oidc_metadata(
         return response, None
     else:
         async with httpx.AsyncClient() as client:
-            resp = await client.get(url)
+            resp = await client.get(url, headers=headers)
             resp.raise_for_status()
             max_age = parse_cache_control_max_age(resp.headers)
             return resp.json(), max_age
@@ -131,10 +137,16 @@ async def fetch_oidc_metadata(
 
 async def fetch_jwks(
     jwks_uri: str,
-    custom_fetch: Optional[Callable[..., Any]] = None
+    custom_fetch: Optional[Callable[..., Any]] = None,
+    headers: Optional[dict[str, str]] = None
 ) -> tuple[dict[str, Any], Optional[int]]:
     """
     Asynchronously fetch the JSON Web Key Set from jwks_uri.
+
+    Args:
+        jwks_uri: The JWKS endpoint URL.
+        custom_fetch: Optional callable that replaces the default HTTP fetch.
+        headers: Headers for the default HTTP client. Not applied when custom_fetch is set.
 
     Returns:
         Tuple of (jwks_dict, max_age_or_none). max_age is parsed from
@@ -149,7 +161,7 @@ async def fetch_jwks(
         return response, None
     else:
         async with httpx.AsyncClient() as client:
-            resp = await client.get(jwks_uri)
+            resp = await client.get(jwks_uri, headers=headers)
             resp.raise_for_status()
             max_age = parse_cache_control_max_age(resp.headers)
             return resp.json(), max_age
@@ -167,7 +179,7 @@ def _decode_jwt_segment(token: Union[str, bytes], segment_index: int) -> dict:
         Decoded segment as dictionary
 
     Raises:
-        ValueError: If token format is invalid
+        ValueError: If token format is invalid, or the segment is not a JSON object or is nested too deeply
     """
     if isinstance(token, bytes):
         token = token.decode("utf-8")
@@ -181,7 +193,13 @@ def _decode_jwt_segment(token: Union[str, bytes], segment_index: int) -> dict:
     segment_b64 = fix_base64_padding(segment_b64)
 
     segment_data = base64.urlsafe_b64decode(segment_b64)
-    return json.loads(segment_data)
+    try:
+        segment = json.loads(segment_data)
+    except RecursionError:
+        raise ValueError("Invalid token format: segment is nested too deeply") from None
+    if not isinstance(segment, dict):
+        raise ValueError("Invalid token format: segment is not a JSON object")
+    return segment
 
 
 def get_unverified_header(token: Union[str, bytes]) -> dict:
@@ -193,6 +211,9 @@ def get_unverified_header(token: Union[str, bytes]) -> dict:
 
     Returns:
         Decoded header as dictionary
+
+    Raises:
+        ValueError: If the token is malformed or its header is not a JSON object or is nested too deeply
     """
     return _decode_jwt_segment(token, 0)
 
@@ -206,6 +227,9 @@ def get_unverified_payload(token: Union[str, bytes]) -> dict:
 
     Returns:
         Decoded payload (claims) as dictionary
+
+    Raises:
+        ValueError: If the token is malformed or its payload is not a JSON object or is nested too deeply
     """
     return _decode_jwt_segment(token, 1)
 

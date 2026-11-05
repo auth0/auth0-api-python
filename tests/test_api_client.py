@@ -17,8 +17,10 @@ from conftest import (
     assert_api_error,
     assert_form_post,
     assert_no_requests,
+    assert_telemetry_headers,
     last_form,
     token_success,
+    unsigned_jwt,
 )
 from freezegun import freeze_time
 from pytest_httpx import HTTPXMock
@@ -555,6 +557,34 @@ async def test_verify_access_token_fail_malformed_token():
     assert "failed to parse token" in str(e.value).lower()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header,payload,message", [
+    ([1], {"iss": "https://auth0.local/"}, "failed to parse token header"),
+    ("text", {"iss": "https://auth0.local/"}, "failed to parse token header"),
+    (5, {"iss": "https://auth0.local/"}, "failed to parse token header"),
+    (None, {"iss": "https://auth0.local/"}, "failed to parse token header"),
+    (True, {"iss": "https://auth0.local/"}, "failed to parse token header"),
+    ({"alg": 5}, {"iss": "https://auth0.local/"}, "'alg'"),
+    ({"alg": None}, {"iss": "https://auth0.local/"}, "'alg'"),
+    ({"alg": ["RS256"]}, {"iss": "https://auth0.local/"}, "'alg'"),
+    ({"alg": {"a": 1}}, {"iss": "https://auth0.local/"}, "'alg'"),
+    ({"alg": True}, {"iss": "https://auth0.local/"}, "'alg'"),
+    ({"alg": "RS256"}, [1], "failed to parse token payload"),
+    ({"alg": "RS256"}, "text", "failed to parse token payload"),
+    ({"alg": "RS256"}, 5, "failed to parse token payload"),
+    ({"alg": "RS256"}, None, "failed to parse token payload"),
+    ({"alg": "RS256"}, True, "failed to parse token payload"),
+])
+async def test_verify_access_token_fail_non_object_segments(header, payload, message):
+    """Test that a header or payload that is not an object fails as an invalid token."""
+
+    api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
+
+    with pytest.raises(VerifyAccessTokenError) as e:
+        await api_client.verify_access_token(unsigned_jwt(header, payload))
+    assert message in str(e.value).lower()
+
+
 FETCH_FAILURES = [
     ("connect_error", True),
     ("http_500", True),
@@ -610,6 +640,24 @@ async def test_verify_access_token_jwks_fetch_failure_status(httpx_mock: HTTPXMo
 
 
 @pytest.mark.asyncio
+async def test_discovery_and_jwks_requests_send_telemetry_header(httpx_mock: HTTPXMock):
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"issuer": "https://auth0.local/", "jwks_uri": JWKS_URL}
+    )
+    httpx_mock.add_response(method="GET", url=JWKS_URL, json={"keys": [PUBLIC_RSA_JWK]})
+    access_token = await generate_token(domain="auth0.local", user_id="user_123", audience="my-audience")
+    api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
+
+    await api_client.verify_access_token(access_token)
+
+    discovery, jwks = httpx_mock.get_requests()
+    assert_telemetry_headers(discovery)
+    assert_telemetry_headers(jwks)
+
+
+@pytest.mark.asyncio
 async def test_verify_access_token_custom_fetch_failure_is_unavailable():
     """A custom_fetch that raises is reported as an unavailable auth server."""
     async def failing_fetch(url, **kwargs):
@@ -638,6 +686,36 @@ async def test_verify_access_token_custom_fetch_non_network_error_stays_invalid_
 
     assert not isinstance(err.value, AuthServerUnavailableError)
     assert err.value.get_status_code() == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrap", [True, False], ids=["response-object", "plain-dict"])
+async def test_custom_fetch_gets_url_only_and_token_requests_keep_telemetry(wrap, httpx_mock: HTTPXMock):
+    """custom_fetch serves discovery and JWKS with the URL only, while token requests still send telemetry."""
+    calls = []
+    metadata = {"issuer": "https://auth0.local/", "jwks_uri": JWKS_URL, "token_endpoint": TOKEN_ENDPOINT}
+
+    async def fetch(url):  # no **kwargs, so a headers argument would raise TypeError
+        calls.append(url)
+        body = metadata if url == DISCOVERY_URL else {"keys": [PUBLIC_RSA_JWK]}
+        return httpx.Response(200, json=body) if wrap else body
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        custom_fetch=fetch,
+    ))
+    access_token = await generate_token(domain="auth0.local", user_id="user_123", audience="my-audience")
+
+    claims = await api_client.verify_access_token(access_token)
+    assert claims["sub"] == "user_123"
+    assert calls == [DISCOVERY_URL, JWKS_URL]
+
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success())
+    await api_client.get_client_credentials_token(audience="https://billing-api.example.com")
+    assert_telemetry_headers(httpx_mock.get_requests()[-1])
 
 
 @pytest.mark.asyncio
@@ -1149,6 +1227,59 @@ async def test_verify_dpop_proof_fail_no_http_url():
     assert "http_url" in str(err.value).lower()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proof", [
+    unsigned_jwt([1], {}),
+    unsigned_jwt("text", {}),
+    unsigned_jwt(None, {}),
+    "a.b",
+    "not-a-jwt",
+])
+async def test_verify_dpop_proof_fail_unparseable_header(proof):
+    """
+    Test that a proof whose header cannot be parsed into an object fails as an invalid proof.
+    """
+    api_client = ApiClient(
+        ApiClientOptions(domain="auth0.local", audience="my-audience")
+    )
+
+    with pytest.raises(InvalidDpopProofError):
+        await api_client.verify_dpop_proof(
+            access_token="test_token",
+            proof=proof,
+            http_method="GET",
+            http_url="https://api.example.com/resource"
+        )
+
+
+@pytest.mark.asyncio
+async def test_verify_dpop_proof_fail_incomplete_jwk():
+    """
+    Test that a proof whose jwk has no coordinates fails as an invalid proof.
+    """
+    access_token = "test_token"
+    proof = await generate_dpop_proof(
+        access_token=access_token,
+        http_method="GET",
+        http_url="https://api.example.com/resource",
+        header_overrides={"jwk": {"kty": "EC", "crv": "P-256"}},
+    )
+
+    api_client = ApiClient(
+        ApiClientOptions(domain="auth0.local", audience="my-audience")
+    )
+
+    with pytest.raises(InvalidDpopProofError) as err:
+        await api_client.verify_dpop_proof(
+            access_token=access_token,
+            proof=proof,
+            http_method="GET",
+            http_url="https://api.example.com/resource"
+        )
+
+    assert "jwk" in str(err.value).lower()
+
+
 # --- Claim Validation Tests ---
 
 @pytest.mark.asyncio
@@ -1410,6 +1541,61 @@ async def test_verify_dpop_proof_fail_invalid_iat_in_future():
     assert "iat is from the future" in str(err.value).lower()
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad_iat", [float("nan"), float("inf"), float("-inf")])
+async def test_verify_dpop_proof_fail_non_finite_iat(bad_iat):
+    """
+    Test that a DPoP proof whose 'iat' is NaN or infinite fails verification.
+    """
+    access_token = "test_token"
+    dpop_proof = await generate_dpop_proof(
+        access_token=access_token,
+        http_method="GET",
+        http_url="https://api.example.com/resource",
+        iat_time=bad_iat
+    )
+
+    api_client = ApiClient(
+        ApiClientOptions(domain="auth0.local", audience="my-audience")
+    )
+
+    with pytest.raises(InvalidDpopProofError) as err:
+        await api_client.verify_dpop_proof(
+            access_token=access_token,
+            proof=dpop_proof,
+            http_method="GET",
+            http_url="https://api.example.com/resource"
+        )
+
+    assert "invalid iat" in str(err.value).lower()
+
+@pytest.mark.asyncio
+async def test_verify_dpop_proof_fail_iat_too_large_for_float():
+    """
+    Test that a DPoP proof whose 'iat' is an integer too large to convert to a float fails verification.
+    """
+    access_token = "test_token"
+    dpop_proof = await generate_dpop_proof(
+        access_token=access_token,
+        http_method="GET",
+        http_url="https://api.example.com/resource",
+        iat_time=10**400
+    )
+
+    api_client = ApiClient(
+        ApiClientOptions(domain="auth0.local", audience="my-audience")
+    )
+
+    with pytest.raises(InvalidDpopProofError) as err:
+        await api_client.verify_dpop_proof(
+            access_token=access_token,
+            proof=dpop_proof,
+            http_method="GET",
+            http_url="https://api.example.com/resource"
+        )
+
+    assert "from the future" in str(err.value).lower()
+
+@pytest.mark.asyncio
 async def test_verify_dpop_proof_iat_exact_boundary_conditions():
     """
     Test IAT timing validation at exact boundary conditions.
@@ -1580,6 +1766,34 @@ async def test_verify_dpop_proof_with_missing_jti():
             http_url="https://api.example.com/resource"
         )
     assert "missing required claim: jti" in str(err.value).lower()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_htm", [5, ["GET"], None, True])
+async def test_verify_dpop_proof_fail_non_string_htm(bad_htm):
+    """
+    Test that a DPoP proof whose 'htm' claim is not a string fails verification.
+    """
+    access_token = "test_token"
+    dpop_proof = await generate_dpop_proof(
+        access_token=access_token,
+        http_method=bad_htm,
+        http_url="https://api.example.com/resource",
+    )
+
+    api_client = ApiClient(
+        ApiClientOptions(domain="auth0.local", audience="my-audience")
+    )
+
+    with pytest.raises(InvalidDpopProofError) as err:
+        await api_client.verify_dpop_proof(
+            access_token=access_token,
+            proof=dpop_proof,
+            http_method="GET",
+            http_url="https://api.example.com/resource"
+        )
+
+    assert "htm" in str(err.value).lower()
+
 
 @pytest.mark.asyncio
 async def test_verify_dpop_proof_fail_htm_mismatch():
@@ -1964,6 +2178,59 @@ async def test_verify_request_dpop_scheme_success(httpx_mock: HTTPXMock):
     assert "sub" in result
     assert result["aud"] == "my-audience"
     assert result["iss"] == "https://auth0.local/"
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proof", [unsigned_jwt([1], {}), unsigned_jwt(None, {})])
+async def test_verify_request_dpop_fail_non_object_proof_header(proof):
+    """
+    Test that a DPoP proof whose header is not an object is rejected as an invalid proof.
+    """
+    api_client = ApiClient(
+        ApiClientOptions(domain="auth0.local", audience="my-audience")
+    )
+
+    with pytest.raises(InvalidDpopProofError):
+        await api_client.verify_request(
+            headers={"authorization": "DPoP some-token", "dpop": proof},
+            http_method="GET",
+            http_url="https://api.example.com/resource"
+        )
+
+
+@pytest.mark.asyncio
+async def test_verify_request_dpop_fail_non_string_htm(httpx_mock: HTTPXMock):
+    """
+    Test that a DPoP proof with a non-string 'htm' claim is rejected through verify_request.
+    """
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"jwks_uri": JWKS_URL, "issuer": "https://auth0.local/"},
+    )
+    httpx_mock.add_response(method="GET", url=JWKS_URL, json={"keys": [PUBLIC_RSA_JWK]})
+
+    access_token = await generate_token_with_cnf(
+        domain="auth0.local",
+        user_id="test_user",
+        audience="my-audience",
+    )
+    dpop_proof = await generate_dpop_proof(
+        access_token=access_token,
+        http_method=5,
+        http_url="https://api.example.com/resource"
+    )
+
+    api_client = ApiClient(
+        ApiClientOptions(domain="auth0.local", audience="my-audience")
+    )
+
+    with pytest.raises(InvalidDpopProofError):
+        await api_client.verify_request(
+            headers={"authorization": f"DPoP {access_token}", "dpop": dpop_proof},
+            http_method="GET",
+            http_url="https://api.example.com/resource"
+        )
+
 
 @pytest.mark.asyncio
 async def test_verify_request_header_normalization(httpx_mock: HTTPXMock):
@@ -2481,6 +2748,18 @@ async def test_get_access_token_for_connection_with_login_hint(httpx_mock: HTTPX
     assert form_data["login_hint"] == ["user@example.com"]
 
 @pytest.mark.asyncio
+async def test_get_access_token_for_connection_sends_telemetry_header(mock_discovery, api_client_confidential_no_store, httpx_mock):
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success())
+
+    await api_client_confidential_no_store.get_access_token_for_connection({
+        "connection": "test-conn",
+        "access_token": "user-token"
+    })
+
+    assert_telemetry_headers(httpx_mock.get_requests()[-1])
+
+
+@pytest.mark.asyncio
 async def test_get_access_token_for_connection_missing_connection():
     options = ApiClientOptions(
         domain="auth0.local",
@@ -2733,6 +3012,31 @@ async def test_get_access_token_for_connection_expires_in_not_integer(httpx_mock
     assert err.value.status_code == 502
 
 
+@pytest.mark.asyncio
+async def test_get_access_token_for_connection_expires_in_negative(httpx_mock: HTTPXMock):
+    httpx_mock.add_response(method="GET", url=DISCOVERY_URL, json={"token_endpoint": TOKEN_ENDPOINT})
+    httpx_mock.add_response(
+        method="POST",
+        url=TOKEN_ENDPOINT,
+        status_code=200,
+        json={"access_token": "abc123", "expires_in": -1}
+    )
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+    ))
+    with pytest.raises(ApiError) as err:
+        await api_client.get_access_token_for_connection({
+            "connection": "test-conn",
+            "access_token": "user-token"
+        })
+    assert err.value.code == "invalid_response"
+    assert "negative" in str(err.value).lower()
+    assert err.value.status_code == 502
+
+
 # ===== Custom Token Exchange Tests =====
 
 
@@ -2787,6 +3091,19 @@ async def test_get_token_by_exchange_profile_success(httpx_mock: HTTPXMock):
     assert form_data["subject_token"] == ["custom-token-123"]
     assert form_data["subject_token_type"] == ["urn:example:custom-token"]
     assert form_data["audience"] == ["https://api.example.com"]
+
+
+@pytest.mark.asyncio
+async def test_get_token_by_exchange_profile_sends_telemetry_header(mock_discovery, api_client_confidential, httpx_mock):
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success())
+
+    await api_client_confidential.get_token_by_exchange_profile(
+        subject_token="custom-token-123",
+        subject_token_type="urn:example:custom-token",
+        audience="https://api.example.com",
+    )
+
+    assert_telemetry_headers(httpx_mock.get_requests()[-1])
 
 
 @freeze_time("2025-01-01T00:00:00Z")
@@ -3590,6 +3907,18 @@ async def test_get_token_on_behalf_of_success(mock_discovery, api_client_confide
 
 
 @pytest.mark.asyncio
+async def test_get_token_on_behalf_of_sends_telemetry_header(mock_discovery, api_client_confidential_no_store, httpx_mock):
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success())
+
+    await api_client_confidential_no_store.get_token_on_behalf_of(
+        access_token="incoming-access-token",
+        audience="https://api.backend.com",
+    )
+
+    assert_telemetry_headers(httpx_mock.get_requests()[-1])
+
+
+@pytest.mark.asyncio
 async def test_get_token_on_behalf_of_preserves_inferred_expires_at(
     api_client_confidential_no_store,
     monkeypatch,
@@ -3760,6 +4089,15 @@ async def test_get_client_credentials_token_success(mock_discovery, api_client_c
 
 
 @pytest.mark.asyncio
+async def test_get_client_credentials_token_sends_telemetry_header(mock_discovery, api_client_confidential, httpx_mock):
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success())
+
+    await api_client_confidential.get_client_credentials_token(audience="https://billing-api.example.com")
+
+    assert_telemetry_headers(httpx_mock.get_requests()[-1])
+
+
+@pytest.mark.asyncio
 async def test_get_client_credentials_token_missing_credentials():
     """Test that M2M raises GetClientCredentialsTokenError when credentials are not configured."""
     api_client = ApiClient(ApiClientOptions(
@@ -3836,6 +4174,7 @@ async def test_get_client_credentials_token_no_scope_in_response(
         {"json": {"access_token": "", "expires_in": 3600}},
         {"json": {"access_token": "t"}},
         {"json": {"access_token": "t", "expires_in": "soon"}},
+        {"json": {"access_token": "t", "expires_in": -1}},
     ],
 )
 async def test_get_client_credentials_token_malformed_response(

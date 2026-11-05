@@ -33,9 +33,6 @@ def session_fingerprint(access_token: str) -> str:
     except ValueError:
         return hashlib.sha256(access_token.encode()).hexdigest()
 
-    if not isinstance(payload, dict):
-        return hashlib.sha256(access_token.encode()).hexdigest()
-
     sid = payload.get("sid")
     if isinstance(sid, str) and sid:
         return sid

@@ -1,6 +1,7 @@
 """Shared test fixtures and helpers for auth0-api-python tests."""
 
 import base64
+import json
 import time
 import urllib.parse
 from typing import Optional
@@ -97,6 +98,15 @@ def mock_discovery(httpx_mock: HTTPXMock):
 
 
 # ===== Helper Functions =====
+
+def unsigned_jwt(header, payload) -> str:
+    """Build a JWT-shaped string from any JSON values, with a dummy signature."""
+
+    def encode(value):
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+
+    return f"{encode(header)}.{encode(payload)}.signature"
+
 
 def last_form(httpx_mock: HTTPXMock) -> dict[str, list[str]]:
     """Helper to read the last posted form data."""
@@ -206,6 +216,17 @@ def assert_http_basic_auth(httpx_mock: HTTPXMock, username: str, password: str):
     decoded = base64.b64decode(encoded).decode("utf-8")
     expected = f"{username}:{password}"
     assert decoded == expected, f"Expected '{expected}', got '{decoded}'"
+
+
+def auth0_client_payload(request) -> dict:
+    """Decode the Auth0-Client header of a recorded request."""
+    return json.loads(base64.b64decode(request.headers["Auth0-Client"]))
+
+
+def assert_telemetry_headers(request, name: str = "auth0-api-python"):
+    """Assert a recorded request carries both telemetry headers."""
+    assert auth0_client_payload(request)["name"] == name
+    assert request.headers["User-Agent"].startswith("Python/")
 
 
 def assert_form_post(

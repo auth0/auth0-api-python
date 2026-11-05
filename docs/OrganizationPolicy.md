@@ -51,6 +51,10 @@ api_client = ApiClient(ApiClientOptions(
 
 `organization_id` compares the opaque `org_id` claim value directly (string comparison, no network call). It does not accept or resolve the human-readable Organization name. It must be a non-empty string or a non-empty list of non-empty strings, otherwise `ConfigurationError` is raised at construction.
 
+## Token Exchange
+
+The policy is enforced when a token is verified. `get_token_on_behalf_of()` and `get_access_token_for_connection()` verify the incoming token, and so apply the policy, only when a `token_store` is configured and `verified` is not passed. Without a store, they send the token straight to Auth0 for the exchange and do not check `org_id`. Call `verify_access_token()` first at your API boundary, as in the examples above, so the policy applies before any exchange.
+
 ## Error Handling
 
 ### Configuration Errors

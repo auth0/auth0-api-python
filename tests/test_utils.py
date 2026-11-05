@@ -3,15 +3,21 @@ Tests for utility functions in auth0_api_python.utils
 """
 
 import asyncio
+import base64
 
 import pytest
+from conftest import unsigned_jwt
 
 from auth0_api_python.token_utils import generate_token
 from auth0_api_python.utils import (
+    get_unverified_header,
     get_unverified_payload,
     normalize_domain,
     parse_cache_control_max_age,
 )
+
+NON_OBJECT_SEGMENTS = [[1], "text", 5, None, True]
+
 
 # ===== normalize_domain =====
 
@@ -106,6 +112,44 @@ def test_normalize_domain_rejects_empty():
         normalize_domain("   ")
 
 
+# ===== get_unverified_header =====
+
+
+@pytest.mark.parametrize("segment", NON_OBJECT_SEGMENTS)
+def test_get_unverified_header_rejects_non_object(segment):
+    """Test that a header that is not a JSON object raises ValueError."""
+    with pytest.raises(ValueError, match="not a JSON object"):
+        get_unverified_header(unsigned_jwt(segment, {"iss": "https://tenant.auth0.com/"}))
+
+
+def _raise_recursion_error(*args, **kwargs):
+    raise RecursionError
+
+
+@pytest.mark.parametrize("index", [0, 1])
+def test_get_unverified_segments_reject_deeply_nested_json(index, monkeypatch):
+    """Test that a segment the parser cannot handle for depth raises ValueError."""
+    monkeypatch.setattr("auth0_api_python.utils.json.loads", _raise_recursion_error)
+    parts = ["e30", "e30", "sig"]
+    decode = get_unverified_header if index == 0 else get_unverified_payload
+
+    with pytest.raises(ValueError, match="nested"):
+        decode(".".join(parts))
+
+
+@pytest.mark.parametrize("index", [0, 1])
+def test_get_unverified_segments_reject_real_deeply_nested_json(index):
+    """Test that a segment nested far deeper than the parser allows raises ValueError."""
+    depth = 200_000
+    deep = base64.urlsafe_b64encode(("[" * depth + "]" * depth).encode()).rstrip(b"=").decode()
+    parts = ["e30", "e30", "sig"]
+    parts[index] = deep
+    decode = get_unverified_header if index == 0 else get_unverified_payload
+
+    with pytest.raises(ValueError):
+        decode(".".join(parts))
+
+
 # ===== get_unverified_payload =====
 
 
@@ -133,6 +177,13 @@ def test_get_unverified_payload_invalid_token():
 
     with pytest.raises(ValueError, match="Invalid token format"):
         get_unverified_payload(invalid_token)
+
+
+@pytest.mark.parametrize("segment", NON_OBJECT_SEGMENTS)
+def test_get_unverified_payload_rejects_non_object(segment):
+    """Test that a payload that is not a JSON object raises ValueError."""
+    with pytest.raises(ValueError, match="not a JSON object"):
+        get_unverified_payload(unsigned_jwt({"alg": "RS256"}, segment))
 
 
 # ===== parse_cache_control_max_age =====
