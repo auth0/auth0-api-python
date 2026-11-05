@@ -1,7 +1,8 @@
 SPHINXOPTS    ?=
 SPHINXBUILD   ?= sphinx-build
-SOURCEDIR     = .
-BUILDDIR      = _build
+SOURCEDIR     = $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+BUILDDIR      = $(SOURCEDIR)_build
+JSONDIR       = $(SOURCEDIR)json
 
 .PHONY: help html json clean
 
@@ -12,8 +13,8 @@ html:
 	@$(SPHINXBUILD) -M html "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
 
 json:
-	@$(SPHINXBUILD) -b json "$(SOURCEDIR)" "json" $(SPHINXOPTS) $(O)
+	@$(SPHINXBUILD) -b json "$(SOURCEDIR)" "$(JSONDIR)" $(SPHINXOPTS) $(O)
 
 clean:
 	@$(SPHINXBUILD) -M clean "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
-	rm -rf autoapi/
+	rm -rf "$(SOURCEDIR)autoapi"
