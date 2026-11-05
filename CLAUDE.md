@@ -57,7 +57,7 @@ Before changing a flow (Bearer/DPoP verification, token exchange, MCD, caching),
 ### Always Do
 
 - Run `poetry run pytest` and `poetry run ruff check .` before committing (both run in CI across the Python matrix in `.github/workflows/test.yml`).
-- Make surgical changes: touch only what the request requires. Do not refactor or reformat adjacent code.
+- Make surgical changes. Touch only what the request requires. Do not refactor or reformat adjacent code.
 - Follow existing style and naming. Add new public `ApiClient` methods after the existing public methods, above the `# ===== Private Methods =====` banner in `api_client.py`. Add new private helpers below it. Never reorder existing declarations.
 - Add unit tests for new functionality, marked `@pytest.mark.asyncio` when async, mocking HTTP with `pytest-httpx` (no real network calls).
 - Raise typed errors from `errors.py` (subclasses of `BaseAuthError` with `get_status_code()` / `get_error_code()`). Wrap third-party failures in a typed error with `raise ... from e`. Inside a catch-all, re-raise this SDK's own errors first (`except VerifyAccessTokenError: raise`, as `verify_access_token` does) so they are not double-wrapped. Never return `None` or a bare `dict` to signal failure, and never leak raw `httpx`/`authlib` errors from public methods.
