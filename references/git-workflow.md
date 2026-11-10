@@ -34,4 +34,4 @@ From `.github/workflows/`. Which of these are required status checks is set in b
 
 ## Releases
 
-`.version` is the version source. `.shiprc` keeps `pyproject.toml` in step with it. Releases are cut by `publish.yml` (manual dispatch, gated on the RL scan), not by an agent editing version files. Nothing in `.github/workflows/`, `.github/actions/`, or `.shiprc` writes `CHANGELOG.md`. Release PRs change it together with the version files.
+`.version` is the version source. `.shiprc` keeps `pyproject.toml` in step with it. Releases are cut by `publish.yml` (manual dispatch, gated on the RL scan), not by an agent editing version files. One run takes the release notes from the `release/<version>` PR body, creates the GitHub release and its tag, then builds and publishes to PyPI. Nothing in `.github/workflows/`, `.github/actions/`, or `.shiprc` writes `CHANGELOG.md`. Release PRs change it together with the version files.
