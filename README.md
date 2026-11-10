@@ -462,6 +462,18 @@ claims = await api_client.verify_access_token(access_token)
 
 See the **[Organization Policy Guide](docs/OrganizationPolicy.md)** for policy modes, the allowlist, and error handling.
 
+### 10. Client Telemetry
+
+The SDK sends an `Auth0-Client` header and a `User-Agent` header (`Python/<version>`) on the requests it makes to Auth0 with its default HTTP client. Requests served by `custom_fetch` do not carry them. If you build a wrapper SDK on top of this one, pass `client_info` so the header names your SDK. An invalid `client_info` raises `ConfigurationError` when the client is created.
+
+```python
+api_client = ApiClient(ApiClientOptions(
+    domain="<AUTH0_DOMAIN>",
+    audience="<AUTH0_AUDIENCE>",
+    client_info={"name": "my-wrapper-sdk", "version": "1.2.3", "env": {"my-framework": "4.5.6"}},
+))
+```
+
 ## Feedback
 
 ### Contributing

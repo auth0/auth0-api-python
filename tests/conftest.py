@@ -218,6 +218,17 @@ def assert_http_basic_auth(httpx_mock: HTTPXMock, username: str, password: str):
     assert decoded == expected, f"Expected '{expected}', got '{decoded}'"
 
 
+def auth0_client_payload(request) -> dict:
+    """Decode the Auth0-Client header of a recorded request."""
+    return json.loads(base64.b64decode(request.headers["Auth0-Client"]))
+
+
+def assert_telemetry_headers(request, name: str = "auth0-api-python"):
+    """Assert a recorded request carries both telemetry headers."""
+    assert auth0_client_payload(request)["name"] == name
+    assert request.headers["User-Agent"].startswith("Python/")
+
+
 def assert_form_post(
     httpx_mock: HTTPXMock,
     *,

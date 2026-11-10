@@ -20,7 +20,7 @@ class ApiClientOptions:
                  Can be a static list of domain strings or a callable that returns
                  allowed domains dynamically. Optional if domain is provided.
         audience: The expected 'aud' claim in the token.
-        custom_fetch: Optional callable that can replace the default HTTP fetch logic.
+        custom_fetch: Optional callable that replaces the default HTTP fetch for discovery and JWKS requests. It is called with the URL only and receives no telemetry headers.
         cache_adapter: Custom cache implementation. If not provided, uses default InMemoryCache.
         token_store: Custom token storage for token caching. If not provided, caching is disabled and every exchange makes a fresh network call.
         cache_ttl_seconds: Time-to-live for cache entries in seconds (default: 600 = 10 minutes).
@@ -47,6 +47,7 @@ class ApiClientOptions:
                         match. "non_strict" reuses any cached token whose granted scopes cover
                         the request, and requires a token_store subclassing IndexedTokenStore
                         (raises ConfigurationError at construction without one).
+        client_info: Name, version and optional env of a wrapper SDK built on this one, as a dict with non-empty string "name" and "version" keys and an optional "env" dict of string keys and values. Sent in the Auth0-Client header. An invalid value raises ConfigurationError at construction, and the "python" and "auth0-api-python" entries in env are set by this SDK.
     """
     def __init__(
             self,
@@ -68,6 +69,7 @@ class ApiClientOptions:
             organization_policy: Literal["required", "allow"] = "allow",
             organization_id: Optional[Union[str, list[str]]] = None,
             scope_matching: str = "strict",
+            client_info: Optional[dict] = None,
     ):
         self.domain = domain
         self.domains = domains
@@ -87,3 +89,4 @@ class ApiClientOptions:
         self.organization_policy = organization_policy
         self.organization_id = organization_id
         self.scope_matching = scope_matching
+        self.client_info = client_info
