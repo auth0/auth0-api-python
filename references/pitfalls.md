@@ -13,7 +13,7 @@
    - **Installs.** `pyproject.toml` + `poetry.lock` drive installs.
    - **Snyk scan.** `requirements.txt` is a hand-maintained partial list (`authlib`, `httpx`, `ada-url`, `freezegun`, and the pytest packages, without `cryptography`, `jwcrypto`, `requests` or `ruff`) that only the Snyk SCA workflow reads. Changing one without the other leaves the scan out of date.
 5. **`custom_fetch` covers only discovery and JWKS.**
-   - **Discovery and JWKS.** `fetch_oidc_metadata` and `fetch_jwks` (`utils.py`) use the integrator's `custom_fetch` when set. Otherwise they create a plain `httpx.AsyncClient()` with no timeout, so `options.timeout` does not apply to them.
+   - **Discovery and JWKS.** `fetch_oidc_metadata` and `fetch_jwks` (`utils.py`) use the integrator's `custom_fetch` when set. Otherwise they create a plain `httpx.AsyncClient()`, which uses the httpx default timeout of 5 seconds (httpx 0.28.1 in `poetry.lock`), so `options.timeout` does not apply to them.
    - **Token endpoint calls.** The calls in `get_access_token_for_connection`, `get_token_by_exchange_profile`, and `get_client_credentials_token` always build their own `httpx.AsyncClient` with `options.timeout`.
    - **Telemetry headers.** The default client and the token endpoint calls also send `self._telemetry_headers` (`Auth0-Client`, `User-Agent`), but `custom_fetch` is called with the URL only and receives none of them.
    - **For new HTTP paths.** Do not assume a new path inherits either behaviour, pick the matching pattern deliberately.

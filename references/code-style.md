@@ -49,7 +49,7 @@ def get_token(self, options):                                   # sync, untyped
     return resp.json()                                          # unvalidated dict escapes
 ```
 
-Each line is a separate violation: sync in an async SDK, no timeout, unfiltered OAuth parameters, a print of a possibly token-bearing body, a `None` a caller can mistake for success, and an unvalidated response in the public API.
+Each line is a separate violation: sync in an async SDK, no `options.timeout`, unfiltered OAuth parameters, a print of a possibly token-bearing body, a `None` a caller can mistake for success, and an unvalidated response in the public API.
 
 Public errors meant for integrators are exported from `__init__.py` (`ApiError`, `AuthServerUnavailableError`, `ConfigurationError`, `DomainsResolverError`, `GetAccessTokenForConnectionError`, `GetClientCredentialsTokenError`, `GetTokenByExchangeProfileError`, `MissingOrganizationError`, `OrganizationNotAllowedError`, `VerifyAccessTokenError`). Others are imported from `auth0_api_python.errors`.
 
