@@ -23,4 +23,4 @@ Tests: `tests/test_api_client.py` covers every `ApiClient` flow, `tests/test_act
 
 With a `token_store`, `get_token_on_behalf_of` and `get_access_token_for_connection` call `verify_access_token` without `request_url` or `request_headers` when `verified=` is omitted, so a dynamic MCD resolver receives `None` for both. Pass `verified=` from a prior `verify_request` or `verify_access_token` call in that case.
 
-Two rules cut across every flow: never fetch from a token-derived host unless it passed the allowlist (single-domain mode only fetches the configured `domain`), and in new code fail closed with a typed error on every failure path. A cold-cache discovery outage in the token methods still raises a raw `httpx` error today.
+Two rules cut across every flow: never fetch from a token-derived host unless it passed the allowlist (single-domain mode only fetches the configured `domain`), and in new code fail closed with a typed error on every failure path. A cold-cache discovery outage in the token methods raises a raw `httpx` error.

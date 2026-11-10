@@ -36,6 +36,6 @@ find . -path ./.venv\* -prune -o -name __pycache__ -type d -prune -exec rm -rf {
 ## Not available here
 
 - **No typecheck command.** mypy/pyright are not in `pyproject.toml` and no CI step runs them.
-- **No integration/e2e tier.** The detected suite runs on `pytest-httpx` mocks, and nothing in `src/`, `tests/`, or CI reads Auth0 tenant credentials.
+- **No integration/e2e tier.** The suite runs on `pytest-httpx` mocks, and nothing in `src/`, `tests/`, or CI reads Auth0 tenant credentials.
 
-`publish.yml` (manual `workflow_dispatch`) builds, runs the RL scanner, and publishes to PyPI. Agents do not run releases.
+`publish.yml` (manual `workflow_dispatch`) builds, runs the RL scanner, and publishes to PyPI.

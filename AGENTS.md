@@ -120,7 +120,7 @@ Before changing a flow (Bearer/DPoP verification, token exchange, MCD, caching),
 - **`verified=` is a trust boundary:** a supplied `VerifiedToken` is not re-verified. Only its `access_token` is compared to the token being exchanged, and its claims then build the cache key. Pass only claims returned by `verify_access_token`.
 - **Errors:** `_prepare_error` builds `WWW-Authenticate` headers and leaves them empty for status 500 and above. `AuthServerUnavailableError` (503) reaches it via `verify_request`. `DomainsResolverError` (500) does not, because `verify_request` only catches `VerifyAccessTokenError` and `InvalidDpopProofError`. Error messages reach HTTP responses, so keep them generic and free of token contents. One existing exception: the symmetric-algorithm rejection in `verify_access_token` puts the token header's `alg` into the message, and `_build_www_authenticate` writes the description into the header without escaping. Do not copy that pattern.
 - **Anonymous callers:** tokens with `sub` starting `anon@` verify like any token. Authorization is the integrator's call. The SDK must not silently accept or reject them.
-- **Dependency scanning:** Snyk (`sca_scan.yml`, from `requirements.txt`, on push to `main` only), CodeQL (`codeql.yml`), and ruff `S` (bandit) rules in CI.
+- **Dependency scanning:** Snyk (`sca_scan.yml`, from `requirements.txt`, on push to `main` or `master` only), CodeQL (`codeql.yml`), and ruff `S` (bandit) rules in CI.
 - **Vulnerability reports:** go through Auth0's Responsible Disclosure Program (README "Vulnerability Reporting"), never a public issue or PR.
 
 ---
@@ -145,7 +145,7 @@ Branches `feat/`, `fix/`, `docs/`, `chore/`, `release/<version>`. Commits use Co
 
 ## Common Pitfalls
 
-The ones that bite most: the `pyproject.toml` Python floor (no `X | None` while it is below 3.10), `ruff format` is not a CI gate, a missing `@pytest.mark.asyncio`, function-level imports (`PLC0415`), and `custom_fetch` covering only discovery/JWKS (those fetches also have no `options.timeout`). See [references/pitfalls.md](references/pitfalls.md). Read it when a command, test, or CI job behaves unexpectedly.
+Common failures include the `pyproject.toml` Python floor (no `X | None` while it is below 3.10), `ruff format` not being a CI gate, a missing `@pytest.mark.asyncio`, function-level imports (`PLC0415`), and `custom_fetch` covering only discovery/JWKS (those fetches also have no `options.timeout`). See [references/pitfalls.md](references/pitfalls.md). Read it when a command, test, or CI job behaves unexpectedly.
 
 ## Docs Update Rules
 
