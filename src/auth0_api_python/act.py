@@ -3,14 +3,14 @@ Helpers for working with the `act` claim on verified access token claims.
 """
 
 from collections.abc import Mapping
-from typing import Any, Optional
+from typing import Any
 
 from .errors import VerifyAccessTokenError
 
 INVALID_ACT_CLAIM_MESSAGE = "Invalid act claim"
 
 
-def get_current_actor(claims: Mapping[str, Any]) -> Optional[str]:
+def get_current_actor(claims: Mapping[str, Any]) -> str | None:
     """
     Return the current actor from the outermost `act.sub`, if present.
 

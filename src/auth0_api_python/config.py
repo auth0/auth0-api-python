@@ -2,7 +2,8 @@
 Configuration classes and utilities for auth0-api-python.
 """
 
-from typing import TYPE_CHECKING, Callable, Literal, Optional, Union
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Literal, Optional
 
 if TYPE_CHECKING:
     from .cache import CacheAdapter
@@ -51,10 +52,10 @@ class ApiClientOptions:
     """
     def __init__(
             self,
-            domain: Optional[str] = None,
+            domain: str | None = None,
             audience: str = "",
-            domains: Optional[Union[list[str], Callable[[dict], list[str]]]] = None,
-            custom_fetch: Optional[Callable[..., object]] = None,
+            domains: list[str] | Callable[[dict], list[str]] | None = None,
+            custom_fetch: Callable[..., object] | None = None,
             cache_adapter: Optional["CacheAdapter"] = None,
             token_store: Optional["AbstractTokenStore"] = None,
             cache_ttl_seconds: int = 600,
@@ -63,13 +64,13 @@ class ApiClientOptions:
             dpop_required: bool = False,
             dpop_iat_leeway: int = 30,
             dpop_iat_offset: int = 300,
-            client_id: Optional[str] = None,
-            client_secret: Optional[str] = None,
+            client_id: str | None = None,
+            client_secret: str | None = None,
             timeout: float = 10.0,
             organization_policy: Literal["required", "allow"] = "allow",
-            organization_id: Optional[Union[str, list[str]]] = None,
+            organization_id: str | list[str] | None = None,
             scope_matching: str = "strict",
-            client_info: Optional[dict] = None,
+            client_info: dict | None = None,
     ):
         self.domain = domain
         self.domains = domains

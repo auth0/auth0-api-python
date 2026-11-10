@@ -3,7 +3,7 @@ Type definitions for auth0-api-python SDK
 """
 
 from collections.abc import Awaitable, Callable
-from typing import Optional, TypedDict, Union
+from typing import TypedDict
 
 
 class ActClaim(TypedDict, total=False):
@@ -28,8 +28,8 @@ class DomainsResolverContext(TypedDict, total=False):
         request_headers: Request headers dict (e.g., Host, X-Forwarded-Host) (optional)
         unverified_iss: The issuer claim from the unverified token
     """
-    request_url: Optional[str]
-    request_headers: Optional[dict]
+    request_url: str | None
+    request_headers: dict | None
     unverified_iss: str
 
 
@@ -74,7 +74,7 @@ class ClientCredentialsTokenResult(TypedDict, total=False):
 
 
 DomainsResolver = Callable[
-    [DomainsResolverContext], Union[list[str], Awaitable[list[str]]]
+    [DomainsResolverContext], list[str] | Awaitable[list[str]]
 ]
 """
 Type alias for domains resolver function.
