@@ -11,7 +11,7 @@
    - **Symptom.** Depending on the pytest version it fails with an "async def functions are not natively supported" message or is skipped with a warning. If a new async test fails that way or shows as skipped, check the marker first.
 4. **Two dependency lists.**
    - **Installs.** `pyproject.toml` + `poetry.lock` drive installs.
-   - **Snyk scan.** `requirements.txt` is a hand-maintained partial list (`authlib`, `httpx`, `ada-url`, and the pytest packages, without `cryptography`, `jwcrypto`, `requests` or `ruff`) that only the Snyk SCA workflow reads. Changing one without the other leaves the scan out of date.
+   - **Snyk scan.** `requirements.txt` is a hand-maintained partial list (`authlib`, `httpx`, `ada-url`, `freezegun`, and the pytest packages, without `cryptography`, `jwcrypto`, `requests` or `ruff`) that only the Snyk SCA workflow reads. Changing one without the other leaves the scan out of date.
 5. **`custom_fetch` covers only discovery and JWKS.**
    - **Discovery and JWKS.** `fetch_oidc_metadata` and `fetch_jwks` (`utils.py`) use the integrator's `custom_fetch` when set. Otherwise they create a plain `httpx.AsyncClient()` with no timeout, so `options.timeout` does not apply to them.
    - **Token endpoint calls.** The calls in `get_access_token_for_connection`, `get_token_by_exchange_profile`, and `get_client_credentials_token` always build their own `httpx.AsyncClient` with `options.timeout`.
