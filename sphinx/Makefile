@@ -17,4 +17,4 @@ json:
 
 clean:
 	@$(SPHINXBUILD) -M clean "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
-	rm -rf "$(SOURCEDIR)autoapi"
+	rm -rf "$(SOURCEDIR)auth0_api_python"

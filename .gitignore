@@ -31,9 +31,21 @@ coverage.xml
 
 # Sphinx
 sphinx/_build/
-sphinx/autoapi/
 
-# Only the page JSON is committed. Everything else Sphinx writes there is not.
-sphinx/json/*
-!sphinx/json/autoapi
-!sphinx/json/index.fjson
+# autoapi writes the module sources next to conf.py. Only the json/ directory is tracked.
+sphinx/*/
+!sphinx/json/
+
+# These Sphinx outputs in json/ are not committed.
+sphinx/json/.buildinfo
+sphinx/json/.doctrees
+sphinx/json/_sources
+sphinx/json/_static
+sphinx/json/environment.pickle
+sphinx/json/genindex.fjson
+sphinx/json/globalcontext.json
+sphinx/json/last_build
+sphinx/json/objects.inv
+sphinx/json/py-modindex.fjson
+sphinx/json/search.fjson
+sphinx/json/searchindex.json
