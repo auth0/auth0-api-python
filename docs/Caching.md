@@ -97,8 +97,8 @@ When the cache is full, the least recently used entry is evicted. A cache miss t
 
 | Method | Signature | Description |
 |---|---|---|
-| `get` | `(key: str) -> Any | None` | Return cached value or `None` if not found / expired |
-| `set` | `(key: str, value: Any, ttl_seconds: int | None) -> None` | Store value with optional TTL |
+| `get` | `(key: str) -> Any \| None` | Return cached value or `None` if not found / expired |
+| `set` | `(key: str, value: Any, ttl_seconds: int \| None) -> None` | Store value with optional TTL |
 | `delete` | `(key: str) -> None` | Remove a single entry |
 | `clear` | `() -> None` | Remove all entries |
 
