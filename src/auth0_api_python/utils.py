@@ -8,14 +8,14 @@ import base64
 import hashlib
 import json
 import re
-from collections.abc import Mapping
-from typing import Any, Callable, Optional, Union
+from collections.abc import Callable, Mapping
+from typing import Any
 
 import httpx
 from ada_url import URL
 
 
-def parse_cache_control_max_age(headers: Mapping[str, str]) -> Optional[int]:
+def parse_cache_control_max_age(headers: Mapping[str, str]) -> int | None:
     """
     Parse the max-age directive from a Cache-Control HTTP header.
 
@@ -104,9 +104,9 @@ def is_auth_server_outage(error: Exception) -> bool:
 
 async def fetch_oidc_metadata(
     domain: str,
-    custom_fetch: Optional[Callable[..., Any]] = None,
-    headers: Optional[dict[str, str]] = None
-) -> tuple[dict[str, Any], Optional[int]]:
+    custom_fetch: Callable[..., Any] | None = None,
+    headers: dict[str, str] | None = None
+) -> tuple[dict[str, Any], int | None]:
     """
     Asynchronously fetch the OIDC config from https://{domain}/.well-known/openid-configuration.
 
@@ -137,9 +137,9 @@ async def fetch_oidc_metadata(
 
 async def fetch_jwks(
     jwks_uri: str,
-    custom_fetch: Optional[Callable[..., Any]] = None,
-    headers: Optional[dict[str, str]] = None
-) -> tuple[dict[str, Any], Optional[int]]:
+    custom_fetch: Callable[..., Any] | None = None,
+    headers: dict[str, str] | None = None
+) -> tuple[dict[str, Any], int | None]:
     """
     Asynchronously fetch the JSON Web Key Set from jwks_uri.
 
@@ -167,7 +167,7 @@ async def fetch_jwks(
             return resp.json(), max_age
 
 
-def _decode_jwt_segment(token: Union[str, bytes], segment_index: int) -> dict:
+def _decode_jwt_segment(token: str | bytes, segment_index: int) -> dict:
     """
     Decode a specific segment from a JWT without verifying signature.
 
@@ -202,7 +202,7 @@ def _decode_jwt_segment(token: Union[str, bytes], segment_index: int) -> dict:
     return segment
 
 
-def get_unverified_header(token: Union[str, bytes]) -> dict:
+def get_unverified_header(token: str | bytes) -> dict:
     """
     Parse the JWT header without verifying signature.
 
@@ -218,7 +218,7 @@ def get_unverified_header(token: Union[str, bytes]) -> dict:
     return _decode_jwt_segment(token, 0)
 
 
-def get_unverified_payload(token: Union[str, bytes]) -> dict:
+def get_unverified_payload(token: str | bytes) -> dict:
     """
     Parse the JWT payload without verifying signature.
 
@@ -279,7 +279,7 @@ def normalize_url_for_htu(raw_url: str) -> str:
     except Exception as e:
         raise ValueError(f"Invalid URL format: {raw_url}") from e
 
-def sha256_base64url(input_str: Union[str, bytes]) -> str:
+def sha256_base64url(input_str: str | bytes) -> str:
     """
     Compute SHA-256 digest of the input string and return a
     Base64URL-encoded string *without* padding.

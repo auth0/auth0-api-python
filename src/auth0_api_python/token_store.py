@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Optional, TypedDict
+from typing import Any, TypedDict
 
 from .encryption import decrypt, encrypt
 from .errors import ConfigurationError
@@ -47,7 +47,7 @@ class AbstractTokenStore(ABC):
         self._secret = secret
 
     @abstractmethod
-    async def get(self, key: str) -> Optional[TokenSet]:
+    async def get(self, key: str) -> TokenSet | None:
         """Return the stored token or None if absent."""
         pass
 

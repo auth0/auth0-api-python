@@ -1,21 +1,20 @@
 """Cache-key builders and scope helpers for the tokens the SDK mints."""
 
 import hashlib
-from typing import Optional
 
 from ..utils import get_unverified_payload
 
 _FIELD_SEPARATOR = "\x1f"
 
 
-def _normalized_scopes(scope: Optional[str]) -> str:
+def _normalized_scopes(scope: str | None) -> str:
     """Sort and dedupe scopes so equivalent scope strings produce the same cache key."""
     if not scope:
         return ""
     return " ".join(sorted(set(scope.split())))
 
 
-def is_covered_by(requested: Optional[str], granted: Optional[str]) -> bool:
+def is_covered_by(requested: str | None, granted: str | None) -> bool:
     """True when the requested scopes are all covered by the granted scopes."""
     granted_set = set(_normalized_scopes(granted).split())
     requested_set = set(_normalized_scopes(requested).split())
@@ -52,7 +51,7 @@ def _obo_identity_fields(
     exchange_tenant: str,
     exchange_client_id: str,
     audience: str,
-    org_id: Optional[str],
+    org_id: str | None,
     session_key: str,
 ) -> list[str]:
     """The fields every OBO cache key shares, namespaced by key kind.
@@ -81,8 +80,8 @@ def obo_cache_key(
     exchange_tenant: str,
     exchange_client_id: str,
     audience: str,
-    org_id: Optional[str],
-    scopes: Optional[str],
+    org_id: str | None,
+    scopes: str | None,
     session_key: str,
 ) -> str:
     """Token cache key for an On Behalf Of exchange.
@@ -112,7 +111,7 @@ def index_cache_key(
     exchange_tenant: str,
     exchange_client_id: str,
     audience: str,
-    org_id: Optional[str],
+    org_id: str | None,
     session_key: str,
 ) -> str:
     """Cache key for the OBO token index, scoped to caller, issuer, exchange, audience, org, and session.
@@ -132,7 +131,7 @@ def index_cache_key(
     return sub + ":" + hashlib.sha256(_FIELD_SEPARATOR.join(fields).encode()).hexdigest()
 
 
-def m2m_cache_key(*, tenant: str, client_id: str, audience: str, scopes: Optional[str]) -> str:
+def m2m_cache_key(*, tenant: str, client_id: str, audience: str, scopes: str | None) -> str:
     """Cache key for a client-credentials (M2M) exchange, scoped to tenant, client, audience, and scopes."""
     fields = _FIELD_SEPARATOR.join(
         ["m2m", tenant, client_id, audience, _normalized_scopes(scopes)]
@@ -141,7 +140,7 @@ def m2m_cache_key(*, tenant: str, client_id: str, audience: str, scopes: Optiona
 
 
 def token_vault_cache_key(
-    *, sub: str, connection: str, tenant: str, client_id: str, login_hint: Optional[str] = None
+    *, sub: str, connection: str, tenant: str, client_id: str, login_hint: str | None = None
 ) -> str:
     """Cache key for a Token Vault exchange, scoped to tenant, client, caller, connection, and login hint."""
     fields = _FIELD_SEPARATOR.join(["token_vault", tenant, client_id, sub, connection, login_hint or ""])

@@ -3,7 +3,7 @@ import logging
 import math
 import time
 from collections.abc import Mapping, Sequence
-from typing import Any, Optional, Union
+from typing import Any
 
 import httpx
 from authlib.jose import JsonWebKey, JsonWebToken
@@ -202,9 +202,9 @@ class ApiClient:
     async def _resolve_allowed_domains(
         self,
         unverified_iss: str,
-        request_url: Optional[str] = None,
-        request_headers: Optional[dict] = None
-    ) -> Optional[list[str]]:
+        request_url: str | None = None,
+        request_headers: dict | None = None
+    ) -> list[str] | None:
         """
         Resolve and validate allowed domains for the given issuer.
 
@@ -289,8 +289,8 @@ class ApiClient:
     async def verify_request(
         self,
         headers: dict[str, str],
-        http_method: Optional[str] = None,
-        http_url: Optional[str] = None
+        http_method: str | None = None,
+        http_url: str | None = None
     ) -> dict[str, Any]:
         """
         Dispatch based on Authorization scheme:
@@ -473,9 +473,9 @@ class ApiClient:
     async def verify_access_token(
         self,
         access_token: str,
-        request_url: Optional[str] = None,
-        request_headers: Optional[dict] = None,
-        required_claims: Optional[list[str]] = None
+        request_url: str | None = None,
+        request_headers: dict | None = None,
+        required_claims: list[str] | None = None
     ) -> dict[str, Any]:
         """
         Asynchronously verifies the provided JWT access token.
@@ -769,7 +769,7 @@ class ApiClient:
         self,
         options: dict[str, Any],
         *,
-        verified: Optional[VerifiedToken] = None,
+        verified: VerifiedToken | None = None,
     ) -> dict[str, Any]:
         """
         Retrieves a token for a connection.
@@ -927,10 +927,10 @@ class ApiClient:
         self,
         subject_token: str,
         subject_token_type: str,
-        audience: Optional[str] = None,
-        scope: Optional[str] = None,
-        requested_token_type: Optional[str] = None,
-        extra: Optional[Mapping[str, Union[str, Sequence[str]]]] = None
+        audience: str | None = None,
+        scope: str | None = None,
+        requested_token_type: str | None = None,
+        extra: Mapping[str, str | Sequence[str]] | None = None
     ) -> dict[str, Any]:
         """
         Exchange a subject token for an Auth0 token using RFC 8693.
@@ -1126,9 +1126,9 @@ class ApiClient:
         self,
         access_token: str,
         audience: str,
-        scope: Optional[str] = None,
+        scope: str | None = None,
         *,
-        verified: Optional[VerifiedToken] = None,
+        verified: VerifiedToken | None = None,
     ) -> OnBehalfOfTokenResult:
         """
         Exchange an Auth0 access token for another Auth0 access token targeting a downstream API
@@ -1217,7 +1217,7 @@ class ApiClient:
     async def get_client_credentials_token(
         self,
         audience: str,
-        scope: Optional[str] = None,
+        scope: str | None = None,
     ) -> ClientCredentialsTokenResult:
         """
         Obtain a client credentials (M2M) access token for a server-to-server call.
@@ -1378,7 +1378,7 @@ class ApiClient:
     def _apply_extra(
         self,
         params: dict[str, Any],
-        extra: Mapping[str, Union[str, Sequence[str]]]
+        extra: Mapping[str, str | Sequence[str]]
     ) -> None:
         """
         Apply extra parameters to the params dict with validation.
@@ -1417,7 +1417,7 @@ class ApiClient:
             else:
                 params[key] = str(v)
 
-    async def _discover(self, issuer: Optional[str] = None) -> dict[str, Any]:
+    async def _discover(self, issuer: str | None = None) -> dict[str, Any]:
         """
         Lazy-load OIDC discovery metadata.
 
@@ -1516,7 +1516,7 @@ class ApiClient:
 
             raise InvalidDpopProofError(error_message)
 
-    def _prepare_error(self, error: BaseAuthError, auth_scheme: Optional[str] = None) -> BaseAuthError:
+    def _prepare_error(self, error: BaseAuthError, auth_scheme: str | None = None) -> BaseAuthError:
         """
         Prepare an error with WWW-Authenticate headers based on error type and context.
 
@@ -1553,9 +1553,9 @@ class ApiClient:
     def _build_www_authenticate(
         self,
         *,
-        error_code: Optional[str] = None,
-        error_description: Optional[str] = None,
-        auth_scheme: Optional[str] = None
+        error_code: str | None = None,
+        error_description: str | None = None,
+        auth_scheme: str | None = None
     ) -> list[tuple[str, str]]:
         """
         Returns one or two ('WWW-Authenticate', ...) tuples based on context.
