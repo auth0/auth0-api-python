@@ -16,6 +16,6 @@
    - **Discovery and JWKS.** `fetch_oidc_metadata` and `fetch_jwks` (`utils.py`) use the integrator's `custom_fetch` when set. Otherwise they create a plain `httpx.AsyncClient()`, which uses the httpx default timeout of 5 seconds (httpx 0.28.1 in `poetry.lock`), so `options.timeout` does not apply to them.
    - **Token endpoint calls.** The calls in `get_access_token_for_connection`, `get_token_by_exchange_profile`, and `get_client_credentials_token` always build their own `httpx.AsyncClient` with `options.timeout`.
    - **Telemetry headers.** The default client and the token endpoint calls also send `self._telemetry_headers` (`Auth0-Client`, `User-Agent`), but `custom_fetch` is called with the URL only and receives none of them.
-   - **For new HTTP paths.** Do not assume a new path inherits either behaviour, pick the matching pattern deliberately.
+   - **For new HTTP paths.** Do not assume a new path inherits the timeout or the telemetry headers of another. Pick the matching pattern deliberately.
 6. **Imports must be at module top level.** `.ruff.toml` enforces `PLC0415`, so an import inside a function fails `ruff check .`. Move it to the top of the file. For an import needed only in type annotations, use `if TYPE_CHECKING:` as `config.py` does.
 7. **Stale local venvs.** A hand-made venv in the working tree (anything other than Poetry's) may not have the package or dev dependencies installed. Use `poetry install` then `poetry run ...` so you test the same environment CI does.
