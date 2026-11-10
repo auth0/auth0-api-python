@@ -72,7 +72,6 @@ and `delete`. The base class requires a `secret` at construction and provides `e
 
 ```python
 import time
-from typing import Optional
 
 import redis.asyncio as redis
 
@@ -84,7 +83,7 @@ class RedisTokenStore(AbstractTokenStore):
         super().__init__(secret=secret)
         self.redis = redis_client
 
-    async def get(self, key: str) -> Optional[TokenSet]:
+    async def get(self, key: str) -> TokenSet | None:
         raw = await self.redis.get(key)
         if raw is None:
             return None

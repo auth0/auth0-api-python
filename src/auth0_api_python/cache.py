@@ -15,11 +15,11 @@ class CacheAdapter(ABC):
             def __init__(self, redis_client):
                 self.redis = redis_client
 
-            def get(self, key: str) -> Optional[Any]:
+            def get(self, key: str) -> Any | None:
                 value = self.redis.get(key)
                 return json.loads(value) if value else None
 
-            def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> None:
+            def set(self, key: str, value: Any, ttl_seconds: int | None = None) -> None:
                 self.redis.set(key, json.dumps(value), ex=ttl_seconds)
 
             def delete(self, key: str) -> None:
