@@ -17,8 +17,9 @@ Before changing a flow, read its entry points and supporting helpers. Public met
 | Multiple Custom Domains | `ApiClientOptions(domains=...)` | `_resolve_allowed_domains`, `utils.normalize_domain`, `types.DomainsResolverContext`, `DomainsResolverError` | `docs/MultipleCustomDomain.md`, `README.md` section 7 |
 | Discovery / JWKS caching | `CacheAdapter`, `InMemoryCache` (`cache.py`) | `_discover`, `_fetch_jwks`, `utils.parse_cache_control_max_age` | `docs/Caching.md` |
 | Anonymous callers | no dedicated code, verified like any token | `act.py` is unrelated, `sub` starts with `anon@` | `README.md` section 8, `EXAMPLES.md` "Anonymous Callers" |
+| Client telemetry | option `client_info` | `telemetry.py` (`build_telemetry_headers`, `validate_client_info`), `ApiClient.__init__` (raises `ConfigurationError` on an invalid `client_info`, sets `_telemetry_headers`), `headers=` on `fetch_oidc_metadata` / `fetch_jwks` and the token endpoint calls. `custom_fetch` receives no headers | `README.md` section 10 |
 
-Tests: `tests/test_api_client.py` covers every `ApiClient` flow, `tests/test_act.py` the delegation helpers, `tests/test_cache.py` the cache, `tests/test_utils.py` the utils, `tests/test_token_store.py` the token store, encryption, and cache keys.
+Tests: `tests/test_api_client.py` covers every `ApiClient` flow, `tests/test_act.py` the delegation helpers, `tests/test_cache.py` the cache, `tests/test_utils.py` the utils, `tests/test_token_store.py` the token store, encryption, and cache keys, and `tests/test_telemetry.py` the telemetry headers.
 
 With a `token_store`, `get_token_on_behalf_of` and `get_access_token_for_connection` call `verify_access_token` without `request_url` or `request_headers` when `verified=` is omitted, so a dynamic MCD resolver receives `None` for both. Pass `verified=` from a prior `verify_request` or `verify_access_token` call in that case.
 

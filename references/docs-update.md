@@ -6,7 +6,7 @@ A PR that changes public API, configuration, or integration patterns is not comp
 
 | Doc | Covers | Exists |
 |-----|--------|--------|
-| `README.md` | Install, `ApiClient` setup, verification, connection tokens, custom token exchange, OBO, client credentials, DPoP modes and options, MCD summary, anonymous callers, organization policy | present |
+| `README.md` | Install, `ApiClient` setup, verification, connection tokens, custom token exchange, OBO, client credentials, DPoP modes and options, MCD summary, anonymous callers, organization policy, client telemetry | present |
 | `EXAMPLES.md` | OBO exchange and caching, client credentials, Token Vault connection tokens, delegation inspection, Bearer and DPoP verification, auth server outage handling, DPoP modes, anonymous caller patterns | present |
 | `docs/Caching.md` | Cache defaults, TTL/max entries, custom `CacheAdapter`, tuning | present |
 | `docs/MultipleCustomDomain.md` | `domains` list and resolver modes, hybrid mode, resolver security requirements, MCD with DPoP, errors, migration | present |
@@ -26,5 +26,6 @@ A PR that changes public API, configuration, or integration patterns is not comp
 | `token_store`, `scope_matching`, the `AbstractTokenStore` / `IndexedTokenStore` interface, cache keys, or the expiry buffer | `docs/TokenStorage.md`, `README.md` sections 4 and 5, `EXAMPLES.md` caching samples |
 | `organization_policy` / `organization_id` behaviour or their errors, or when `get_token_on_behalf_of` / `get_access_token_for_connection` verify the incoming token | `docs/OrganizationPolicy.md` (incl. "Token Exchange"), `README.md` section 9 |
 | Discovery or JWKS outage handling (`AuthServerUnavailableError`) | `README.md` section 3, `docs/MultipleCustomDomain.md` "Issuer Rejection", `EXAMPLES.md` "Telling an Outage from an Invalid Token" |
+| `client_info` or the `Auth0-Client` / `User-Agent` headers (`telemetry.py`) | `README.md` section 10 |
 | New exported symbol in `__init__.py` | `EXAMPLES.md` (add a usage sample) |
 | Supported Python version or install method | `README.md` "Install the SDK" |

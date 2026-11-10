@@ -1,7 +1,7 @@
 # Testing
 
 - **Framework:** pytest, with pytest-asyncio, pytest-httpx, pytest-mock, freezegun (versions in `pyproject.toml` dev group)
-- **Location:** `tests/`, grouped by area (`test_api_client.py`, `test_cache.py`, `test_utils.py`, `test_act.py`, `test_token_store.py`), not one file per source module
+- **Location:** `tests/`, grouped by area (`test_api_client.py`, `test_cache.py`, `test_utils.py`, `test_act.py`, `test_token_store.py`, `test_telemetry.py`), not one file per source module
 - **Coverage:** pytest-cov. `pyproject.toml` `addopts` always applies `--cov=src --cov-report=term-missing:skip-covered --cov-report=xml`. No minimum threshold is configured.
 
 The default `poetry run pytest` suite needs no credentials. All Auth0 HTTP calls go through `httpx_mock`. Fixtures use `https://auth0.local`, and `test_api_client.py` also uses `tenant1.auth0.com`.
@@ -32,5 +32,6 @@ poetry run pytest tests/test_api_client.py -k dpop  # filter by name
   - `mock_token_response(...)`, `token_success(...)`, `last_form(...)`, `last_auth_header(...)`: token endpoint mocking and request inspection
   - `unsigned_jwt(header, payload)`: a JWT-shaped string from any JSON values with a dummy signature, for malformed header and payload tests
   - `assert_api_error(...)`, `assert_http_basic_auth(...)`, `assert_form_post(...)`, `assert_no_requests(...)`: shared assertions. Use `assert_api_error` rather than hand-rolling `.code` / status checks
+  - `auth0_client_payload(request)`, `assert_telemetry_headers(request, name=...)`: decode the `Auth0-Client` header of a recorded request, and assert it and `User-Agent` are present. Use these for any test of requests sent to Auth0
 - `src/auth0_api_python/token_utils.py` provides `generate_token`, `generate_dpop_proof`, `generate_token_with_cnf`, signed with a synthetic test key. Use these instead of hand-building JWTs.
 - Use the constants `DISCOVERY_URL`, `JWKS_URL`, `TOKEN_ENDPOINT` from `conftest.py` rather than repeating URLs.
