@@ -1,5 +1,27 @@
 # Change Log
 
+## [1.0.0b11](https://github.com/auth0/auth0-api-python/tree/1.0.0b11) (2026-11-11)
+[Full Changelog](https://github.com/auth0/auth0-api-python/compare/1.0.0b10...1.0.0b11)
+
+**⚠️ Breaking: Minimum supported Python version is now 3.10**
+- Python 3.9 has reached end of life and is no longer supported. Upgrade to Python 3.10 or later, or stay on `1.0.0b10` if you are on Python 3.9. [\#159](https://github.com/auth0/auth0-api-python/pull/159) ([kishore7snehil](https://github.com/kishore7snehil))
+
+**Added**
+- feat: add organization policy enforcement [\#135](https://github.com/auth0/auth0-api-python/pull/135) ([kishore7snehil](https://github.com/kishore7snehil))
+- feat: add server-side token storage with OBO caching [\#136](https://github.com/auth0/auth0-api-python/pull/136) ([kishore7snehil](https://github.com/kishore7snehil))
+- feat: add client credentials token support for M2M [\#138](https://github.com/auth0/auth0-api-python/pull/138) ([kishore7snehil](https://github.com/kishore7snehil))
+- feat: add caching for Token Vault connection token exchanges [\#139](https://github.com/auth0/auth0-api-python/pull/139) ([kishore7snehil](https://github.com/kishore7snehil))
+- feat: add AuthServerUnavailableError for discovery and JWKS fetch failures [\#148](https://github.com/auth0/auth0-api-python/pull/148) ([kishore7snehil](https://github.com/kishore7snehil))
+- feat: send Auth0-Client and User-Agent headers on requests to Auth0 [\#153](https://github.com/auth0/auth0-api-python/pull/153) ([kishore7snehil](https://github.com/kishore7snehil))
+
+**Changed**
+- docs: Added docs for anonymous sessions [\#122](https://github.com/auth0/auth0-api-python/pull/122) ([rmad17](https://github.com/rmad17))
+- chore: migrate ruff config to [lint] and enforce top-level imports [\#140](https://github.com/auth0/auth0-api-python/pull/140) ([kishore7snehil](https://github.com/kishore7snehil))
+
+**Fixed**
+- fix: reject tokens that are not yet valid and avoid reusing near-expiry cached tokens [\#149](https://github.com/auth0/auth0-api-python/pull/149) ([kishore7snehil](https://github.com/kishore7snehil))
+- fix: reject malformed token and DPoP proof input with SDK errors [\#151](https://github.com/auth0/auth0-api-python/pull/151) ([kishore7snehil](https://github.com/kishore7snehil))
+
 ## [1.0.0b10](https://github.com/auth0/auth0-api-python/tree/1.0.0b10) (2026-08-03)
 [Full Changelog](https://github.com/auth0/auth0-api-python/compare/1.0.0b9...1.0.0b10)
 
