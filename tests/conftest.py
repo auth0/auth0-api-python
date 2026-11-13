@@ -4,7 +4,6 @@ import base64
 import json
 import time
 import urllib.parse
-from typing import Optional
 
 import pytest
 from pytest_httpx import HTTPXMock
@@ -26,7 +25,7 @@ class InMemoryTokenStore(AbstractTokenStore):
         super().__init__(secret=secret)
         self._store: dict[str, TokenSet] = {}
 
-    async def get(self, key: str) -> Optional[TokenSet]:
+    async def get(self, key: str) -> TokenSet | None:
         entry = self._store.get(key)
         if entry is None:
             return None
@@ -114,14 +113,14 @@ def last_form(httpx_mock: HTTPXMock) -> dict[str, list[str]]:
     return urllib.parse.parse_qs(req.content.decode())
 
 
-def last_auth_header(httpx_mock: HTTPXMock) -> Optional[str]:
+def last_auth_header(httpx_mock: HTTPXMock) -> str | None:
     """Get the Authorization header from the last request."""
     return httpx_mock.get_requests()[-1].headers.get("authorization")
 
 
 def mock_token_response(
     httpx_mock: HTTPXMock,
-    token_json: Optional[dict] = None,
+    token_json: dict | None = None,
     status: int = 200,
     content_type: str = "application/json"
 ):
@@ -183,9 +182,9 @@ def token_success(**overrides) -> dict:
 def assert_api_error(
     exc: Exception,
     *,
-    code: Optional[str] = None,
-    status: Optional[int] = None,
-    contains: Optional[str] = None
+    code: str | None = None,
+    status: int | None = None,
+    contains: str | None = None
 ):
     """
     Assert that an exception is an ApiError with expected properties.
@@ -232,10 +231,10 @@ def assert_telemetry_headers(request, name: str = "auth0-api-python"):
 def assert_form_post(
     httpx_mock: HTTPXMock,
     *,
-    expect_fields: Optional[dict[str, list[str]]] = None,
-    forbid_fields: Optional[list[str]] = None,
-    expect_basic_auth: Optional[tuple[str, str]] = None,
-    expect_url: Optional[str] = None
+    expect_fields: dict[str, list[str]] | None = None,
+    forbid_fields: list[str] | None = None,
+    expect_basic_auth: tuple[str, str] | None = None,
+    expect_url: str | None = None
 ):
     """
     Assert properties of the last form POST request.

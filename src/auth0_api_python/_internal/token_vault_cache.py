@@ -2,7 +2,7 @@
 
 import logging
 import time
-from typing import Any, Optional
+from typing import Any
 
 from ..token_store import AbstractTokenStore, TokenSet
 from .cache_expiry import is_fresh
@@ -22,8 +22,8 @@ class TokenVaultCache:
         self._store = token_store
 
     def cache_key(
-        self, tenant: str, client_id: str, sub: Any, connection: str, login_hint: Optional[str] = None
-    ) -> Optional[str]:
+        self, tenant: str, client_id: str, sub: Any, connection: str, login_hint: str | None = None
+    ) -> str | None:
         """Return the cache key, or None when sub is not a usable string (cache skipped with a warning)."""
         if not isinstance(sub, str) or not sub:
             logger.warning("Access token has no usable sub claim, skipping Token Vault cache")
@@ -32,9 +32,9 @@ class TokenVaultCache:
             sub=sub, connection=connection, tenant=tenant, client_id=client_id, login_hint=login_hint
         )
 
-    async def lookup(self, key: str) -> Optional[dict]:
+    async def lookup(self, key: str) -> dict | None:
         """Return a live cached token or None. Miss cases: absent, malformed, expired."""
-        cached: Optional[TokenSet] = None
+        cached: TokenSet | None = None
         try:
             cached = await self._store.get(key)
         except Exception as exc:

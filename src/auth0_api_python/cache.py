@@ -1,6 +1,6 @@
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any
 
 
 class CacheAdapter(ABC):
@@ -15,11 +15,11 @@ class CacheAdapter(ABC):
             def __init__(self, redis_client):
                 self.redis = redis_client
 
-            def get(self, key: str) -> Optional[Any]:
+            def get(self, key: str) -> Any | None:
                 value = self.redis.get(key)
                 return json.loads(value) if value else None
 
-            def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> None:
+            def set(self, key: str, value: Any, ttl_seconds: int | None = None) -> None:
                 self.redis.set(key, json.dumps(value), ex=ttl_seconds)
 
             def delete(self, key: str) -> None:
@@ -30,7 +30,7 @@ class CacheAdapter(ABC):
     """
 
     @abstractmethod
-    def get(self, key: str) -> Optional[Any]:
+    def get(self, key: str) -> Any | None:
         """
         Get value from cache by key.
 
@@ -43,7 +43,7 @@ class CacheAdapter(ABC):
         pass
 
     @abstractmethod
-    def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> None:
+    def set(self, key: str, value: Any, ttl_seconds: int | None = None) -> None:
         """
         Set value in cache with optional TTL.
 
@@ -100,10 +100,10 @@ class InMemoryCache(CacheAdapter):
         Args:
             max_entries: Maximum number of cache entries (default: 100)
         """
-        self._cache: dict[str, tuple[Any, Optional[float]]] = {}
+        self._cache: dict[str, tuple[Any, float | None]] = {}
         self._max_entries = max_entries
 
-    def get(self, key: str) -> Optional[Any]:
+    def get(self, key: str) -> Any | None:
         """
         Get value from cache by key.
 
@@ -129,7 +129,7 @@ class InMemoryCache(CacheAdapter):
 
         return value
 
-    def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> None:
+    def set(self, key: str, value: Any, ttl_seconds: int | None = None) -> None:
         """
         Set value in cache with optional TTL.
 

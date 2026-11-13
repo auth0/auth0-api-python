@@ -1,6 +1,6 @@
 import time
 import uuid
-from typing import Any, Optional, Union
+from typing import Any
 
 from authlib.jose import JsonWebKey, jwt
 
@@ -27,11 +27,11 @@ PRIVATE_JWK = {
 async def generate_token(
     domain: str,
     user_id: str,
-    audience: Optional[str] = None,
-    issuer: Union[str, bool, None] = None,
+    audience: str | None = None,
+    issuer: str | bool | None = None,
     iat: bool = True,
     exp: bool = True,
-    claims: Optional[dict[str, Any]] = None,
+    claims: dict[str, Any] | None = None,
     expiration_time: int = 3600,
 ) -> str:
     """
@@ -102,11 +102,11 @@ async def generate_dpop_proof(
     access_token: str,
     http_method: str,
     http_url: str,
-    jti: Optional[str] = None,
+    jti: str | None = None,
     iat: bool = True,
-    claims: Optional[dict[str, Any]] = None,
-    header_overrides: Optional[dict[str, Any]] = None,
-    iat_time: Optional[int] = None,
+    claims: dict[str, Any] | None = None,
+    header_overrides: dict[str, Any] | None = None,
+    iat_time: int | None = None,
     include_jti: bool = True
 ) -> str:
     """
@@ -176,7 +176,7 @@ async def generate_token_with_cnf(
     domain: str,
     user_id: str,
     audience: str,
-    jkt_thumbprint: Optional[str] = None,
+    jkt_thumbprint: str | None = None,
     **kwargs
 ) -> str:
     """
