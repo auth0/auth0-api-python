@@ -1,0 +1,21 @@
+# Common Pitfalls
+
+1. **Do not run `ruff format .`.** CI runs only `ruff check .`. The codebase is not ruff-formatted, so a repo-wide format produces a large unrelated diff. Match surrounding formatting by hand.
+2. **Python floor compatibility.**
+   - **Where the version lives.** The floor is the `python` constraint under `[tool.poetry.dependencies]` in `pyproject.toml`. `.ruff.toml` `target-version` and the `test.yml` matrix hard-code their own versions and do not follow it, so check all three agree, and raise a mismatch rather than fixing CI or ruff config yourself (Ask First).
+   - **CI coverage.** The CI matrix pins the minor version only, so it tests the latest patch release, not the exact floor patch.
+   - **Syntax limits.** Avoid syntax newer than the floor. While it is below 3.10, that means no `X | Y` type unions at runtime and no `match` statements.
+   - **`ada-url`.** It has separate version constraints above and below 3.10 in `pyproject.toml`.
+3. **Async tests need `@pytest.mark.asyncio`.**
+   - **Why.** No `asyncio_mode` is set in `pyproject.toml`, so pytest-asyncio runs in strict mode and ignores an unmarked async test.
+   - **Symptom.** Depending on the pytest version it fails with an "async def functions are not natively supported" message or is skipped with a warning. If a new async test fails that way or shows as skipped, check the marker first.
+4. **Two dependency lists.**
+   - **Installs.** `pyproject.toml` + `poetry.lock` drive installs.
+   - **Snyk scan.** `requirements.txt` is a hand-maintained partial list (`authlib`, `httpx`, `ada-url`, `freezegun`, and the pytest packages, without `cryptography`, `jwcrypto`, `requests` or `ruff`) that only the Snyk SCA workflow reads. Changing one without the other leaves the scan out of date.
+5. **`custom_fetch` covers only discovery and JWKS.**
+   - **Discovery and JWKS.** `fetch_oidc_metadata` and `fetch_jwks` (`utils.py`) use the integrator's `custom_fetch` when set. Otherwise they create a plain `httpx.AsyncClient()`, which uses the httpx default timeout of 5 seconds (httpx 0.28.1 in `poetry.lock`), so `options.timeout` does not apply to them.
+   - **Token endpoint calls.** The calls in `get_access_token_for_connection`, `get_token_by_exchange_profile`, and `get_client_credentials_token` always build their own `httpx.AsyncClient` with `options.timeout`.
+   - **Telemetry headers.** The default client and the token endpoint calls also send `self._telemetry_headers` (`Auth0-Client`, `User-Agent`), but `custom_fetch` is called with the URL only and receives none of them.
+   - **For new HTTP paths.** Do not assume a new path inherits the timeout or the telemetry headers of another. Pick the matching pattern deliberately.
+6. **Imports must be at module top level.** `.ruff.toml` enforces `PLC0415`, so an import inside a function fails `ruff check .`. Move it to the top of the file. For an import needed only in type annotations, use `if TYPE_CHECKING:` as `config.py` does.
+7. **Stale local venvs.** A hand-made venv in the working tree (anything other than Poetry's) may not have the package or dev dependencies installed. Use `poetry install` then `poetry run ...` so you test the same environment CI does.
