@@ -1,8 +1,1 @@
-auth0-api-python
-================
-
-.. toctree::
-   :hidden:
-   :glob:
-
-   **
+.. Intentionally empty. Mintlify skips pages with no body.
