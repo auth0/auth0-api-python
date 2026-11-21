@@ -35,18 +35,18 @@ For distributed deployments (multiple servers, containers), use a shared cache b
 
 ```python
 import json
-from typing import Any, Optional
+from typing import Any
 from auth0_api_python import ApiClient, ApiClientOptions, CacheAdapter
 
 class RedisCache(CacheAdapter):
     def __init__(self, redis_client):
         self.redis = redis_client
 
-    def get(self, key: str) -> Optional[Any]:
+    def get(self, key: str) -> Any | None:
         value = self.redis.get(key)
         return json.loads(value) if value else None
 
-    def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> None:
+    def set(self, key: str, value: Any, ttl_seconds: int | None = None) -> None:
         serialized = json.dumps(value)
         if ttl_seconds:
             self.redis.set(key, serialized, ex=ttl_seconds)
@@ -97,8 +97,8 @@ When the cache is full, the least recently used entry is evicted. A cache miss t
 
 | Method | Signature | Description |
 |---|---|---|
-| `get` | `(key: str) -> Optional[Any]` | Return cached value or `None` if not found / expired |
-| `set` | `(key: str, value: Any, ttl_seconds: Optional[int]) -> None` | Store value with optional TTL |
+| `get` | `(key: str) -> Any \| None` | Return cached value or `None` if not found / expired |
+| `set` | `(key: str, value: Any, ttl_seconds: int \| None) -> None` | Store value with optional TTL |
 | `delete` | `(key: str) -> None` | Remove a single entry |
 | `clear` | `() -> None` | Remove all entries |
 

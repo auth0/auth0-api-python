@@ -18,11 +18,13 @@ from conftest import (
     assert_api_error,
     assert_form_post,
     assert_no_requests,
+    assert_telemetry_headers,
     last_form,
     token_success,
     unsigned_jwt,
 )
 from freezegun import freeze_time
+from joserfc import jwk, jwt
 from pytest_httpx import HTTPXMock
 
 from auth0_api_python import (
@@ -41,7 +43,6 @@ from auth0_api_python._internal.cache_keys import (
     token_vault_cache_key,
 )
 from auth0_api_python.api_client import MAX_ARRAY_VALUES_PER_KEY, ApiClient
-from auth0_api_python._internal.jose_compat import USE_LEGACY_JOSE
 from auth0_api_python.config import ApiClientOptions
 from auth0_api_python.errors import (
     ApiError,
@@ -141,7 +142,7 @@ async def test_verify_access_token_rs384_requires_explicit_configuration(httpx_m
 
 @pytest.mark.asyncio
 async def test_verify_access_token_rejects_conflicting_jwks_key_algorithm(httpx_mock: HTTPXMock):
-    """Both Python JOSE backends enforce JWK algorithm restrictions."""
+    """JWKS key algorithm restrictions are enforced during access-token verification."""
     token = await generate_token(
         domain="auth0.local", user_id="user_123",
         audience="my-audience", algorithm="RS384",
@@ -200,18 +201,30 @@ async def test_verify_dpop_proof_rejects_non_object_decoded_payload(payload, mon
         access_token=token, http_method="GET", http_url="https://api.example.com/resource",
     )
     client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
-    if USE_LEGACY_JOSE:
-        monkeypatch.setattr(client._dpop_jwt, "decode", lambda *_args, **_kwargs: payload)
-    else:
-        monkeypatch.setattr(
-            "auth0_api_python.api_client.jwt.decode",
-            lambda *_args, **_kwargs: SimpleNamespace(claims=payload),
-        )
+    monkeypatch.setattr(
+        "auth0_api_python.api_client.jwt.decode",
+        lambda *_args, **_kwargs: SimpleNamespace(claims=payload),
+    )
     with pytest.raises(InvalidDpopProofError, match="JSON object"):
         await client.verify_dpop_proof(
             access_token=token, proof=proof,
             http_method="GET", http_url="https://api.example.com/resource",
         )
+
+
+@pytest.mark.asyncio
+async def test_generate_dpop_proof_header_overrides_preserve_valid_signature():
+    """header_overrides are signed into the proof rather than mutating the header post-signing."""
+    proof = await generate_dpop_proof(
+        access_token="test_token",
+        http_method="GET",
+        http_url="https://api.example.com/resource",
+        header_overrides={"typ": "jwt"},
+    )
+    public_key = jwk.import_key({k: v for k, v in PRIVATE_EC_JWK.items() if k != "d"})
+    decoded = jwt.decode(proof, public_key, algorithms=["ES256"])
+    assert decoded.header["typ"] == "jwt"
+    assert decoded.claims["htm"] == "GET"
 
 
 @pytest.mark.asyncio
@@ -767,6 +780,24 @@ async def test_verify_access_token_jwks_fetch_failure_status(httpx_mock: HTTPXMo
 
 
 @pytest.mark.asyncio
+async def test_discovery_and_jwks_requests_send_telemetry_header(httpx_mock: HTTPXMock):
+    httpx_mock.add_response(
+        method="GET",
+        url=DISCOVERY_URL,
+        json={"issuer": "https://auth0.local/", "jwks_uri": JWKS_URL}
+    )
+    httpx_mock.add_response(method="GET", url=JWKS_URL, json={"keys": [PUBLIC_RSA_JWK]})
+    access_token = await generate_token(domain="auth0.local", user_id="user_123", audience="my-audience")
+    api_client = ApiClient(ApiClientOptions(domain="auth0.local", audience="my-audience"))
+
+    await api_client.verify_access_token(access_token)
+
+    discovery, jwks = httpx_mock.get_requests()
+    assert_telemetry_headers(discovery)
+    assert_telemetry_headers(jwks)
+
+
+@pytest.mark.asyncio
 async def test_verify_access_token_custom_fetch_failure_is_unavailable():
     """A custom_fetch that raises is reported as an unavailable auth server."""
     async def failing_fetch(url, **kwargs):
@@ -795,6 +826,36 @@ async def test_verify_access_token_custom_fetch_non_network_error_stays_invalid_
 
     assert not isinstance(err.value, AuthServerUnavailableError)
     assert err.value.get_status_code() == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrap", [True, False], ids=["response-object", "plain-dict"])
+async def test_custom_fetch_gets_url_only_and_token_requests_keep_telemetry(wrap, httpx_mock: HTTPXMock):
+    """custom_fetch serves discovery and JWKS with the URL only, while token requests still send telemetry."""
+    calls = []
+    metadata = {"issuer": "https://auth0.local/", "jwks_uri": JWKS_URL, "token_endpoint": TOKEN_ENDPOINT}
+
+    async def fetch(url):  # no **kwargs, so a headers argument would raise TypeError
+        calls.append(url)
+        body = metadata if url == DISCOVERY_URL else {"keys": [PUBLIC_RSA_JWK]}
+        return httpx.Response(200, json=body) if wrap else body
+
+    api_client = ApiClient(ApiClientOptions(
+        domain="auth0.local",
+        audience="my-audience",
+        client_id="cid",
+        client_secret="csecret",
+        custom_fetch=fetch,
+    ))
+    access_token = await generate_token(domain="auth0.local", user_id="user_123", audience="my-audience")
+
+    claims = await api_client.verify_access_token(access_token)
+    assert claims["sub"] == "user_123"
+    assert calls == [DISCOVERY_URL, JWKS_URL]
+
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success())
+    await api_client.get_client_credentials_token(audience="https://billing-api.example.com")
+    assert_telemetry_headers(httpx_mock.get_requests()[-1])
 
 
 @pytest.mark.asyncio
@@ -2827,6 +2888,18 @@ async def test_get_access_token_for_connection_with_login_hint(httpx_mock: HTTPX
     assert form_data["login_hint"] == ["user@example.com"]
 
 @pytest.mark.asyncio
+async def test_get_access_token_for_connection_sends_telemetry_header(mock_discovery, api_client_confidential_no_store, httpx_mock):
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success())
+
+    await api_client_confidential_no_store.get_access_token_for_connection({
+        "connection": "test-conn",
+        "access_token": "user-token"
+    })
+
+    assert_telemetry_headers(httpx_mock.get_requests()[-1])
+
+
+@pytest.mark.asyncio
 async def test_get_access_token_for_connection_missing_connection():
     options = ApiClientOptions(
         domain="auth0.local",
@@ -3158,6 +3231,19 @@ async def test_get_token_by_exchange_profile_success(httpx_mock: HTTPXMock):
     assert form_data["subject_token"] == ["custom-token-123"]
     assert form_data["subject_token_type"] == ["urn:example:custom-token"]
     assert form_data["audience"] == ["https://api.example.com"]
+
+
+@pytest.mark.asyncio
+async def test_get_token_by_exchange_profile_sends_telemetry_header(mock_discovery, api_client_confidential, httpx_mock):
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success())
+
+    await api_client_confidential.get_token_by_exchange_profile(
+        subject_token="custom-token-123",
+        subject_token_type="urn:example:custom-token",
+        audience="https://api.example.com",
+    )
+
+    assert_telemetry_headers(httpx_mock.get_requests()[-1])
 
 
 @freeze_time("2025-01-01T00:00:00Z")
@@ -3961,6 +4047,18 @@ async def test_get_token_on_behalf_of_success(mock_discovery, api_client_confide
 
 
 @pytest.mark.asyncio
+async def test_get_token_on_behalf_of_sends_telemetry_header(mock_discovery, api_client_confidential_no_store, httpx_mock):
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success())
+
+    await api_client_confidential_no_store.get_token_on_behalf_of(
+        access_token="incoming-access-token",
+        audience="https://api.backend.com",
+    )
+
+    assert_telemetry_headers(httpx_mock.get_requests()[-1])
+
+
+@pytest.mark.asyncio
 async def test_get_token_on_behalf_of_preserves_inferred_expires_at(
     api_client_confidential_no_store,
     monkeypatch,
@@ -4128,6 +4226,15 @@ async def test_get_client_credentials_token_success(mock_discovery, api_client_c
         forbid_fields=["client_id", "client_secret"],
         expect_basic_auth=("cid", "csecret"),
     )
+
+
+@pytest.mark.asyncio
+async def test_get_client_credentials_token_sends_telemetry_header(mock_discovery, api_client_confidential, httpx_mock):
+    httpx_mock.add_response(method="POST", url=TOKEN_ENDPOINT, json=token_success())
+
+    await api_client_confidential.get_client_credentials_token(audience="https://billing-api.example.com")
+
+    assert_telemetry_headers(httpx_mock.get_requests()[-1])
 
 
 @pytest.mark.asyncio

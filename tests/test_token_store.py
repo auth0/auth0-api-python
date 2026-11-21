@@ -2,7 +2,6 @@ import base64
 import hashlib
 import json
 import time
-from typing import Optional
 
 import pytest
 
@@ -31,7 +30,7 @@ class ConcreteTokenStore(AbstractTokenStore):
         super().__init__(secret=secret)
         self._store: dict[str, str] = {}
 
-    async def get(self, key: str) -> Optional[TokenSet]:
+    async def get(self, key: str) -> TokenSet | None:
         raw = self._store.get(key)
         if raw is None:
             return None

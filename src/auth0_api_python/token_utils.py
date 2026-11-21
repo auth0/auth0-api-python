@@ -1,18 +1,12 @@
-import base64
-import json
 import time
 import uuid
-from typing import Any, Optional, Union
+from typing import Any
 
-from ._internal.jose_compat import USE_LEGACY_JOSE
+from joserfc import jwk, jwt
+from joserfc.jws import JWSRegistry
+from joserfc.registry import HeaderParameter
+
 from .utils import calculate_jwk_thumbprint, normalize_url_for_htu, sha256_base64url
-
-# Python 3.9 resolves to Authlib 1.6 without joserfc.
-# Use the legacy Authlib JOSE API on that runtime.
-if USE_LEGACY_JOSE:
-    from authlib.jose import JsonWebKey, jwt
-else:
-    from joserfc import jwk, jwt
 
 # A private RSA JWK for test usage.
 
@@ -35,11 +29,11 @@ PRIVATE_JWK = {
 async def generate_token(
     domain: str,
     user_id: str,
-    audience: Optional[str] = None,
-    issuer: Union[str, bool, None] = None,
+    audience: str | None = None,
+    issuer: str | bool | None = None,
     iat: bool = True,
     exp: bool = True,
-    claims: Optional[dict[str, Any]] = None,
+    claims: dict[str, Any] | None = None,
     expiration_time: int = 3600,
     algorithm: str = "RS256",
 ) -> str:
@@ -91,13 +85,10 @@ async def generate_token(
 
 
     key_data = {**PRIVATE_JWK, "alg": algorithm}
-    if USE_LEGACY_JOSE:
-        key = JsonWebKey.import_key(key_data)
-    else:
-        key = jwk.import_key(key_data)
+    key = jwk.import_key(key_data)
 
     header = {"alg": algorithm, "kid": PRIVATE_JWK["kid"]}
-    token = jwt.encode(header, token_claims, key)
+    token = jwt.encode(header, token_claims, key, algorithms=[algorithm])
     # Ensure we return a string, not bytes
     return token.decode('utf-8') if isinstance(token, bytes) else token
 
@@ -116,11 +107,11 @@ async def generate_dpop_proof(
     access_token: str,
     http_method: str,
     http_url: str,
-    jti: Optional[str] = None,
+    jti: str | None = None,
     iat: bool = True,
-    claims: Optional[dict[str, Any]] = None,
-    header_overrides: Optional[dict[str, Any]] = None,
-    iat_time: Optional[int] = None,
+    claims: dict[str, Any] | None = None,
+    header_overrides: dict[str, Any] | None = None,
+    iat_time: int | None = None,
     include_jti: bool = True
 ) -> str:
     """
@@ -177,32 +168,27 @@ async def generate_dpop_proof(
     }
 
 
-    if USE_LEGACY_JOSE:
-        key = JsonWebKey.import_key(PRIVATE_EC_JWK)
-    else:
-        key = jwk.import_key(PRIVATE_EC_JWK)
+    key = jwk.import_key(PRIVATE_EC_JWK)
 
-    # Sign a valid proof first. Malformed-header fixtures are intentionally
-    # tampered *after* signing so no production registry overrides are needed.
-    token = jwt.encode(header, proof_claims, key)
-    token = token.decode("utf-8") if isinstance(token, bytes) else token
     if header_overrides:
-        protected, payload, signature = token.split(".")
-        padded = protected + "=" * (-len(protected) % 4)
-        modified_header = json.loads(base64.urlsafe_b64decode(padded))
-        modified_header.update(header_overrides)
-        protected = base64.urlsafe_b64encode(
-            json.dumps(modified_header, separators=(",", ":")).encode("utf-8")
-        ).decode("ascii").rstrip("=")
-        token = f"{protected}.{payload}.{signature}"
-    return token
+        header.update(header_overrides)
+        registry = JWSRegistry(
+            header_registry={
+                name: HeaderParameter("header override", lambda _: None)
+                for name in header_overrides
+            }
+        )
+        token = jwt.encode(header, proof_claims, key, registry=registry)
+    else:
+        token = jwt.encode(header, proof_claims, key)
+    return token.decode("utf-8") if isinstance(token, bytes) else token
 
 
 async def generate_token_with_cnf(
     domain: str,
     user_id: str,
     audience: str,
-    jkt_thumbprint: Optional[str] = None,
+    jkt_thumbprint: str | None = None,
     **kwargs
 ) -> str:
     """

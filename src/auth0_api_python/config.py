@@ -2,7 +2,8 @@
 Configuration classes and utilities for auth0-api-python.
 """
 
-from typing import TYPE_CHECKING, Callable, Literal, Optional, Union
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Literal, Optional
 
 if TYPE_CHECKING:
     from .cache import CacheAdapter
@@ -20,7 +21,7 @@ class ApiClientOptions:
                  Can be a static list of domain strings or a callable that returns
                  allowed domains dynamically. Optional if domain is provided.
         audience: The expected 'aud' claim in the token.
-        custom_fetch: Optional callable that can replace the default HTTP fetch logic.
+        custom_fetch: Optional callable that replaces the default HTTP fetch for discovery and JWKS requests. It is called with the URL only and receives no telemetry headers.
         cache_adapter: Custom cache implementation. If not provided, uses default InMemoryCache.
         token_store: Custom token storage for token caching. If not provided, caching is disabled and every exchange makes a fresh network call.
         cache_ttl_seconds: Time-to-live for cache entries in seconds (default: 600 = 10 minutes).
@@ -47,16 +48,17 @@ class ApiClientOptions:
                         match. "non_strict" reuses any cached token whose granted scopes cover
                         the request, and requires a token_store subclassing IndexedTokenStore
                         (raises ConfigurationError at construction without one).
+        client_info: Name, version and optional env of a wrapper SDK built on this one, as a dict with non-empty string "name" and "version" keys and an optional "env" dict of string keys and values. Sent in the Auth0-Client header. An invalid value raises ConfigurationError at construction, and the "python" and "auth0-api-python" entries in env are set by this SDK.
         jwt_algorithms: Non-empty list of supported asymmetric JWT signing algorithms.
                         Defaults to ["RS256"]; unknown, symmetric, and unsigned algorithms
                         raise ConfigurationError at ApiClient construction.
     """
     def __init__(
             self,
-            domain: Optional[str] = None,
+            domain: str | None = None,
             audience: str = "",
-            domains: Optional[Union[list[str], Callable[[dict], list[str]]]] = None,
-            custom_fetch: Optional[Callable[..., object]] = None,
+            domains: list[str] | Callable[[dict], list[str]] | None = None,
+            custom_fetch: Callable[..., object] | None = None,
             cache_adapter: Optional["CacheAdapter"] = None,
             token_store: Optional["AbstractTokenStore"] = None,
             cache_ttl_seconds: int = 600,
@@ -65,13 +67,14 @@ class ApiClientOptions:
             dpop_required: bool = False,
             dpop_iat_leeway: int = 30,
             dpop_iat_offset: int = 300,
-            client_id: Optional[str] = None,
-            client_secret: Optional[str] = None,
+            client_id: str | None = None,
+            client_secret: str | None = None,
             timeout: float = 10.0,
             organization_policy: Literal["required", "allow"] = "allow",
-            organization_id: Optional[Union[str, list[str]]] = None,
+            organization_id: str | list[str] | None = None,
             scope_matching: str = "strict",
-            jwt_algorithms: Optional[list[str]] = None,
+            client_info: dict | None = None,
+            jwt_algorithms: list[str] | None = None,
     ):
         self.domain = domain
         self.domains = domains
@@ -92,3 +95,4 @@ class ApiClientOptions:
         self.organization_policy = organization_policy
         self.organization_id = organization_id
         self.scope_matching = scope_matching
+        self.client_info = client_info

@@ -27,7 +27,7 @@ This SDK provides comprehensive support for securing APIs with Auth0-issued acce
 - **Framework Agnostic** - Works with FastAPI, Django, Flask, or any Python web framework
 
 ## Documentation
-## JWT algorithms and Python-version compatibility
+## JWT algorithms and `joserfc` validation
 
 Access-token verification accepts `RS256` by default. To allow another asymmetric
 signature algorithm, supply `jwt_algorithms` when constructing `ApiClientOptions`:
@@ -47,15 +47,12 @@ declared algorithm must also match any `alg` restriction set on the selected JWK
 key; configuring `RS384` does not override a key declared for `RS256`. A tenant
 that issues RS384 tokens must publish an RS384-capable key.
 
-Python 3.9 uses Authlib's legacy JOSE implementation; Python 3.10+ uses
-`joserfc` directly. Both return decoded access-token and DPoP claims as plain
-dictionaries, and invalid key material produces SDK verification errors.
-`joserfc` imposes additional strict validation of JOSE headers (including
-registered header names and their types), encoded header/payload sizes, and
-JWK usage restrictions (`use`, `key_ops`, and `alg`). Tokens accepted by
-the legacy implementation may be rejected on newer runtimes if they violate
-these requirements. DPoP remains restricted to `ES256` regardless of
-`jwt_algorithms`.
+JOSE operations use `joserfc` directly. Decoded access-token and DPoP claims are
+returned as plain dictionaries, and invalid key material produces SDK verification
+errors. `joserfc` enforces strict validation of JOSE headers (including registered
+header names and their types), encoded header/payload sizes, and JWK usage
+restrictions (`use`, `key_ops`, and `alg`). DPoP remains restricted to `ES256`
+regardless of `jwt_algorithms`.
 
 
 - [Docs Site](https://auth0.com/docs) - explore our docs site and learn more about Auth0.
@@ -73,7 +70,7 @@ This library is part of Auth0's Python ecosystem for server-side authentication 
 
 ### 1. Install the SDK
 
-_This library requires Python 3.9.2+._
+_This library requires Python 3.10+._
 
 ```shell
 pip install auth0-api-python
@@ -491,6 +488,18 @@ claims = await api_client.verify_access_token(access_token)
 ```
 
 See the **[Organization Policy Guide](docs/OrganizationPolicy.md)** for policy modes, the allowlist, and error handling.
+
+### 10. Client Telemetry
+
+The SDK sends an `Auth0-Client` header and a `User-Agent` header (`Python/<version>`) on the requests it makes to Auth0 with its default HTTP client. Requests served by `custom_fetch` do not carry them. If you build a wrapper SDK on top of this one, pass `client_info` so the header names your SDK. An invalid `client_info` raises `ConfigurationError` when the client is created.
+
+```python
+api_client = ApiClient(ApiClientOptions(
+    domain="<AUTH0_DOMAIN>",
+    audience="<AUTH0_AUDIENCE>",
+    client_info={"name": "my-wrapper-sdk", "version": "1.2.3", "env": {"my-framework": "4.5.6"}},
+))
+```
 
 ## Feedback
 
