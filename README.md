@@ -27,6 +27,33 @@ This SDK provides comprehensive support for securing APIs with Auth0-issued acce
 - **Framework Agnostic** - Works with FastAPI, Django, Flask, or any Python web framework
 
 ## Documentation
+## JWT algorithms and `joserfc` validation
+
+Access-token verification accepts `RS256` by default. To allow another asymmetric
+signature algorithm, supply `jwt_algorithms` when constructing `ApiClientOptions`:
+
+```python
+ApiClientOptions(
+    domain="example.us.auth0.com",
+    audience="my-api",
+    jwt_algorithms=["RS256", "RS384"],
+)
+```
+
+The list must be non-empty and contain supported `RS*`, `PS*`, or `ES*` algorithms.
+Symmetric (`HS*`), unsigned (`none`), and unrecognized algorithms are rejected at
+construction. The configuration is copied when the client is constructed. The JWT's
+declared algorithm must also match any `alg` restriction set on the selected JWKS
+key; configuring `RS384` does not override a key declared for `RS256`. A tenant
+that issues RS384 tokens must publish an RS384-capable key.
+
+JOSE operations use `joserfc` directly. Decoded access-token and DPoP claims are
+returned as plain dictionaries, and invalid key material produces SDK verification
+errors. `joserfc` enforces strict validation of JOSE headers (including registered
+header names and their types), encoded header/payload sizes, and JWK usage
+restrictions (`use`, `key_ops`, and `alg`). DPoP remains restricted to `ES256`
+regardless of `jwt_algorithms`.
+
 
 - [Docs Site](https://auth0.com/docs) - explore our docs site and learn more about Auth0.
 

@@ -2,7 +2,9 @@ import time
 import uuid
 from typing import Any
 
-from authlib.jose import JsonWebKey, jwt
+from joserfc import jwk, jwt
+from joserfc.jws import JWSRegistry
+from joserfc.registry import HeaderParameter
 
 from .utils import calculate_jwk_thumbprint, normalize_url_for_htu, sha256_base64url
 
@@ -33,9 +35,10 @@ async def generate_token(
     exp: bool = True,
     claims: dict[str, Any] | None = None,
     expiration_time: int = 3600,
+    algorithm: str = "RS256",
 ) -> str:
     """
-    Generates a real RS256-signed JWT using the private key above.
+    Generates a signed JWT using the private key above.
 
     Args:
         domain: The Auth0 domain (used if issuer is not False).
@@ -49,9 +52,10 @@ async def generate_token(
         exp: Whether to set the 'exp' claim. If False, skip it.
         claims: Additional custom claims to merge into the token.
         expiration_time: If exp is True, how many seconds from now until expiration.
+        algorithm: Signing algorithm (default RS256); tests may use RS384, for example.
 
     Returns:
-        A RS256-signed JWT string.
+        A signed JWT string.
 
     Example usage:
         token = generate_token(
@@ -80,10 +84,11 @@ async def generate_token(
         token_claims["aud"] = audience
 
 
-    key = JsonWebKey.import_key(PRIVATE_JWK)
+    key_data = {**PRIVATE_JWK, "alg": algorithm}
+    key = jwk.import_key(key_data)
 
-    header = {"alg": "RS256", "kid": PRIVATE_JWK["kid"]}
-    token = jwt.encode(header, token_claims, key)
+    header = {"alg": algorithm, "kid": PRIVATE_JWK["kid"]}
+    token = jwt.encode(header, token_claims, key, algorithms=[algorithm])
     # Ensure we return a string, not bytes
     return token.decode('utf-8') if isinstance(token, bytes) else token
 
@@ -163,13 +168,20 @@ async def generate_dpop_proof(
     }
 
 
+    key = jwk.import_key(PRIVATE_EC_JWK)
+
     if header_overrides:
         header.update(header_overrides)
-
-    key = JsonWebKey.import_key(PRIVATE_EC_JWK)
-    token = jwt.encode(header, proof_claims, key)
-    # Ensure we return a string, not bytes
-    return token.decode('utf-8') if isinstance(token, bytes) else token
+        registry = JWSRegistry(
+            header_registry={
+                name: HeaderParameter("header override", lambda _: None)
+                for name in header_overrides
+            }
+        )
+        token = jwt.encode(header, proof_claims, key, registry=registry)
+    else:
+        token = jwt.encode(header, proof_claims, key)
+    return token.decode("utf-8") if isinstance(token, bytes) else token
 
 
 async def generate_token_with_cnf(

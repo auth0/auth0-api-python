@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import httpx
-from authlib.jose import JsonWebKey, JsonWebToken
+from joserfc import jwk, jwt
 
 from ._internal.cache_expiry import is_fresh
 from ._internal.cache_keys import m2m_cache_key
@@ -51,6 +51,14 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
+# Access tokens must use a supported asymmetric signature algorithm.
+# Never allow "none" (unsigned JWTs) or symmetric algorithms with public JWKS keys.
+SUPPORTED_JWT_ALGORITHMS = frozenset({
+    "RS256", "RS384", "RS512",
+    "PS256", "PS384", "PS512",
+    "ES256", "ES384", "ES512",
+})
+
 # Token Exchange constants
 TOKEN_EXCHANGE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:token-exchange"  # noqa: S105
 OBO_ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"  # noqa: S105
@@ -77,6 +85,17 @@ class ApiClient:
         # Validate audience is always required
         if not options.audience:
             raise MissingRequiredArgumentError("audience")
+
+        if not isinstance(options.jwt_algorithms, list) or not options.jwt_algorithms:
+            raise ConfigurationError("jwt_algorithms must be a non-empty list")
+        for algorithm in options.jwt_algorithms:
+            if not isinstance(algorithm, str) or algorithm not in SUPPORTED_JWT_ALGORITHMS:
+                raise ConfigurationError(
+                    f"Unsupported JWT signing algorithm: {algorithm!r}. "
+                    "Only RS*, PS*, and ES* asymmetric algorithms are supported."
+                )
+        # Do not allow mutation of the caller's list to change accepted algorithms.
+        self._jwt_algorithms = list(options.jwt_algorithms)
 
         # Validate domains parameter if provided
         if options.domains is not None:
@@ -190,10 +209,7 @@ class ApiClient:
 
         self._cache_ttl = options.cache_ttl_seconds
 
-        self._jwt = JsonWebToken(["RS256"])
-
         self._dpop_algorithms = ["ES256"]
-        self._dpop_jwt = JsonWebToken(self._dpop_algorithms)
 
     def is_dpop_required(self) -> bool:
         """Check if DPoP authentication is required."""
@@ -481,7 +497,7 @@ class ApiClient:
         Asynchronously verifies the provided JWT access token.
 
         - Fetches OIDC metadata and JWKS if not already cached.
-        - Decodes and validates signature (RS256) with the correct key.
+        - Decodes and validates the signature with the configured jwt_algorithms (default RS256).
         - Checks standard claims: 'iss', 'aud', 'exp', 'nbf', 'iat'
         - Checks extra required claims if 'required_claims' is provided.
         - Enforces organization_policy: requires 'org_id' when set to "required",
@@ -524,6 +540,8 @@ class ApiClient:
                 f"Symmetric algorithm '{alg}' is not supported. "
                 "Only asymmetric algorithms (e.g., RS256) are allowed."
             )
+        if alg not in self._jwt_algorithms:
+            raise VerifyAccessTokenError(f"JWT signing algorithm '{alg}' is not allowed")
 
         # Extract and validate issuer claim (before network calls)
         try:
@@ -610,13 +628,19 @@ class ApiClient:
         if not matching_key_dict:
             raise VerifyAccessTokenError("No matching key found in JWKS")
 
-        # Import public key and verify signature
-        public_key = JsonWebKey.import_key(matching_key_dict)
+        # Respect the key's declared algorithm so a JWKS key for RS256 cannot verify an RS384 token.
+        key_alg = matching_key_dict.get("alg")
+        if key_alg is not None and key_alg != alg:
+            raise VerifyAccessTokenError("JWT algorithm does not match JWKS key algorithm")
 
         if isinstance(access_token, str) and access_token.startswith("b'"):
             access_token = access_token[2:-1]
         try:
-            claims = self._jwt.decode(access_token, public_key)
+            public_key = jwk.import_key(matching_key_dict)
+            claims = jwt.decode(access_token, public_key, algorithms=self._jwt_algorithms).claims
+            if not isinstance(claims, dict):
+                raise ValueError("JWT payload is not a JSON object")
+            claims = dict(claims)
         except Exception as e:
             raise VerifyAccessTokenError(f"Signature verification failed: {str(e)}") from e
 
@@ -712,14 +736,17 @@ class ApiClient:
             raise InvalidDpopProofError("Only P-256 curve is supported")
 
         try:
-            public_key = JsonWebKey.import_key(jwk_dict)
+            public_key = jwk.import_key(jwk_dict)
         except Exception:
             raise InvalidDpopProofError("Missing or invalid jwk in header")
 
         try:
-            claims = self._dpop_jwt.decode(proof, public_key)
+            claims = jwt.decode(proof, public_key, algorithms=self._dpop_algorithms).claims
         except Exception as e:
             raise InvalidDpopProofError(f"JWT signature verification failed: {e}")
+
+        if not isinstance(claims, dict):
+            raise InvalidDpopProofError("DPoP proof payload must be a JSON object")
 
         # Checks all required claims are present
         self._validate_claims_presence(claims, ["iat", "ath", "htm", "htu", "jti"])

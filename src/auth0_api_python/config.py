@@ -49,6 +49,9 @@ class ApiClientOptions:
                         the request, and requires a token_store subclassing IndexedTokenStore
                         (raises ConfigurationError at construction without one).
         client_info: Name, version and optional env of a wrapper SDK built on this one, as a dict with non-empty string "name" and "version" keys and an optional "env" dict of string keys and values. Sent in the Auth0-Client header. An invalid value raises ConfigurationError at construction, and the "python" and "auth0-api-python" entries in env are set by this SDK.
+        jwt_algorithms: Non-empty list of supported asymmetric JWT signing algorithms.
+                        Defaults to ["RS256"]; unknown, symmetric, and unsigned algorithms
+                        raise ConfigurationError at ApiClient construction.
     """
     def __init__(
             self,
@@ -71,10 +74,12 @@ class ApiClientOptions:
             organization_id: str | list[str] | None = None,
             scope_matching: str = "strict",
             client_info: dict | None = None,
+            jwt_algorithms: list[str] | None = None,
     ):
         self.domain = domain
         self.domains = domains
         self.audience = audience
+        self.jwt_algorithms = ["RS256"] if jwt_algorithms is None else jwt_algorithms
         self.custom_fetch = custom_fetch
         self.cache_adapter = cache_adapter
         self.token_store = token_store

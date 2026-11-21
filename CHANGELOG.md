@@ -1,4 +1,19 @@
 # Change Log
+## Unreleased
+
+**Changed**
+- Migrated JOSE operations from `authlib.jose` to `joserfc` across all supported
+  Python versions (3.10+) and dropped the unused `authlib` dependency.
+- Added configurable `jwt_algorithms` for access-token signatures (default
+  `RS256`); only recognized asymmetric algorithms are accepted, and JWKS `alg`
+  restrictions are enforced.
+- Decoded access-token and DPoP claims are returned as plain dictionaries.
+  `joserfc` validates JOSE header names/types, header and payload sizes, and
+  key `use`, `key_ops`, and `alg` metadata more strictly than legacy Authlib.
+  Incompatible tokens or keys may require migration.
+- Malformed DPoP proof payloads and unusable JWKS keys now raise SDK-specific
+  verification errors instead of exposing lower-level exceptions.
+
 
 ## [1.0.0b11](https://github.com/auth0/auth0-api-python/tree/1.0.0b11) (2026-11-11)
 [Full Changelog](https://github.com/auth0/auth0-api-python/compare/1.0.0b10...1.0.0b11)
