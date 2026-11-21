@@ -12,7 +12,7 @@ packages = [
 
 [tool.poetry.dependencies]
 python = ">=3.10"
-joserfc = ">=1.6.8,<2.0"
+joserfc = ">=1.7.6,<2.0"
 requests = "^2.31.0"  # If you use requests for HTTP calls (e.g., discovery)
 httpx = "^0.28.1"
 cryptography = ">=43.0.1"

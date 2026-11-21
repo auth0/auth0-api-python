@@ -1,7 +1,7 @@
 # This file is maintained manually for SCA scanning (.github/workflows/sca_scan.yml)
 # Source of truth for dependencies: pyproject.toml + poetry.lock
 
-joserfc>=1.6.8,<2.0
+joserfc>=1.7.6,<2.0
 httpx>=0.28.1
 ada-url>=1.32.0
 pytest>=8.0
