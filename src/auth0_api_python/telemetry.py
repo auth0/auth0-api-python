@@ -6,7 +6,6 @@ import base64
 import importlib.metadata
 import json
 import platform
-from typing import Optional
 
 _PACKAGE_NAME = "auth0-api-python"
 
@@ -36,7 +35,7 @@ def validate_client_info(client_info: dict) -> None:
         raise ValueError("client_info['env'] must be a dict of string keys and string values")
 
 
-def build_telemetry_headers(client_info: Optional[dict] = None) -> dict[str, str]:
+def build_telemetry_headers(client_info: dict | None = None) -> dict[str, str]:
     """
     Build the Auth0-Client and User-Agent headers.
 

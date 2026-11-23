@@ -2,7 +2,7 @@
 
 import logging
 import time
-from typing import NamedTuple, Optional, cast
+from typing import NamedTuple, cast
 
 from ..token_store import (
     AbstractTokenStore,
@@ -29,7 +29,7 @@ class _OboIdentity(NamedTuple):
     sub: str
     issuer: str
     incoming_client_id: str
-    org_id: Optional[str]
+    org_id: str | None
     session_key: str
 
 
@@ -54,7 +54,7 @@ class OboCache:
         self._exchange_client_id = exchange_client_id
         self._mode = scope_matching
 
-    def identity(self, verified: VerifiedToken) -> Optional[_OboIdentity]:
+    def identity(self, verified: VerifiedToken) -> _OboIdentity | None:
         """Build the cache identity from verified claims, or None when they lack a usable subject."""
         claims = verified.claims
         sub = claims.get("sub")
@@ -77,8 +77,8 @@ class OboCache:
         )
 
     async def lookup(
-        self, identity: _OboIdentity, audience: str, scope: Optional[str]
-    ) -> Optional[OnBehalfOfTokenResult]:
+        self, identity: _OboIdentity, audience: str, scope: str | None
+    ) -> OnBehalfOfTokenResult | None:
         """Return a reusable cached token for this request, or None on a miss."""
         if self._mode == "non_strict":
             return await self._index_lookup(identity, audience, scope)
@@ -88,7 +88,7 @@ class OboCache:
         self,
         identity: _OboIdentity,
         audience: str,
-        scope: Optional[str],
+        scope: str | None,
         obo_result: OnBehalfOfTokenResult,
     ) -> None:
         """Store a freshly exchanged token under its granted scopes."""
@@ -114,7 +114,7 @@ class OboCache:
 
     # ===== Private methods =====
 
-    def _token_key(self, identity: _OboIdentity, audience: str, layout: str, scopes: Optional[str]) -> str:
+    def _token_key(self, identity: _OboIdentity, audience: str, layout: str, scopes: str | None) -> str:
         return obo_cache_key(
             layout=layout,
             sub=identity.sub,
@@ -156,7 +156,7 @@ class OboCache:
         )
 
     @staticmethod
-    def _usable_entry(cached: Optional[TokenSet], now: int) -> bool:
+    def _usable_entry(cached: TokenSet | None, now: int) -> bool:
         if cached is None:
             return False
         if "access_token" not in cached or "expires_at" not in cached:
@@ -177,8 +177,8 @@ class OboCache:
         return result
 
     async def _strict_lookup(
-        self, identity: _OboIdentity, audience: str, scope: Optional[str]
-    ) -> Optional[OnBehalfOfTokenResult]:
+        self, identity: _OboIdentity, audience: str, scope: str | None
+    ) -> OnBehalfOfTokenResult | None:
         now = int(time.time())
         try:
             cached = await self._store.get(self._token_key(identity, audience, "strict", scope))
@@ -193,8 +193,8 @@ class OboCache:
         return self._hit(cached, now)
 
     async def _index_lookup(
-        self, identity: _OboIdentity, audience: str, scope: Optional[str]
-    ) -> Optional[OnBehalfOfTokenResult]:
+        self, identity: _OboIdentity, audience: str, scope: str | None
+    ) -> OnBehalfOfTokenResult | None:
         # An unscoped request is covered by every cached token, so never reuse for one.
         requested_scopes = _normalized_scopes(scope)
         if not requested_scopes:
