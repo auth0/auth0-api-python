@@ -86,7 +86,7 @@ Before changing a flow (Bearer/DPoP verification, token exchange, MCD, caching),
 ### Never Do
 
 - Commit secrets, client secrets, real tokens, or private keys. Test fixtures use placeholder values (`cid`, `csecret`, `auth0.local`).
-- Hand-edit `poetry.lock` or `CHANGELOG.md`, or edit `.version` / the `pyproject.toml` version (the release flow owns the version files via `.shiprc`, and `CHANGELOG.md` is edited at release time).
+- Hand-edit `poetry.lock` or `CHANGELOG.md`, or edit `.version` / the `pyproject.toml` version (the release flow owns the version files via `.shiprc`, and `CHANGELOG.md` is edited in the release PR).
 - Remove or skip a failing test instead of fixing it, or weaken an assertion to make it pass.
 - Fail open. In new code, a validation, resolver, discovery, JWKS, or token endpoint failure must raise a typed error, never fall through to a permissive default (no default domain, no "assume valid"). Existing paths that let a raw `httpx` error escape on a cold-cache discovery outage are known gaps, not a pattern to copy.
 - Compare secrets or token-derived values with `==` in new code. Use `hmac.compare_digest`. Do not copy the `!=` used for the `cnf.jkt` and `ath` checks and for `verified.access_token` against the token being exchanged.
@@ -114,11 +114,11 @@ Before changing a flow (Bearer/DPoP verification, token exchange, MCD, caching),
   - **Verification:** with a store, `get_token_on_behalf_of` and `get_access_token_for_connection` verify the token first (unless `verified=` is passed), then key the cache from the verified claims.
   - **Encryption:** `AbstractTokenStore` supplies `encrypt` / `decrypt` JWE helpers (HKDF-SHA256, `dir`, `A256CBC-HS512`) and a 32-character minimum secret, but the SDK never calls them. A store must encrypt in its own `get` / `set`, otherwise tokens are stored in plaintext.
   - **Reuse and failure:** a cached token is reused only with more than 30 seconds left (`EXPIRY_BUFFER_SECONDS`). A store read failure is a cache miss, and a write failure is logged while the fresh token is still returned. Store exceptions are logged with their message, so a store must keep token values out of exception text.
-  - **OBO keys:** the caller's `sub` in plain text, then a hash of issuer, incoming client, exchange tenant and client, audience, `org_id`, session and scopes. The session value is the token's `sid`, then its `jti`, and if neither is a usable string (or the payload cannot be parsed) a SHA-256 of the token itself. A store reader can see which callers have entries. Index keys and the `token_key` in index members have the same form.
+  - **OBO keys:** the caller's `sub` in plain text, then a hash of issuer, incoming client, exchange tenant and client, audience, `org_id`, session and scopes. The session value is the token's `sid`, then its `jti`, and if neither is a usable string (or the payload cannot be parsed) a SHA-256 of the token itself. A store reader can see which callers have entries. The `token_key` in each index member is an OBO key of this form. The index key itself has the same `sub` prefix but hashes its own `obo_index` namespace and no scopes.
   - **M2M keys:** a hash of tenant, client, audience and scopes.
   - **Token Vault keys:** a hash of tenant, client, `sub`, connection and `login_hint`.
 - **`verified=` is a trust boundary:** a supplied `VerifiedToken` is not re-verified. Only its `access_token` is compared to the token being exchanged, and its claims then build the cache key. Pass only claims returned by `verify_access_token`.
-- **Errors:** `_prepare_error` builds `WWW-Authenticate` headers and leaves them empty for status 500 and above. `AuthServerUnavailableError` (503) reaches it via `verify_request`. `DomainsResolverError` (500) does not, because `verify_request` only catches `VerifyAccessTokenError` and `InvalidDpopProofError`. Error messages reach HTTP responses, so keep them generic and free of token contents. One existing exception: the symmetric-algorithm rejection in `verify_access_token` puts the token header's `alg` into the message, and `_build_www_authenticate` writes the description into the header without escaping. Do not copy that pattern.
+- **Errors:** `_prepare_error` builds `WWW-Authenticate` headers and leaves them empty for status 500 and above. `AuthServerUnavailableError` (503) reaches it via `verify_request`. `DomainsResolverError` (500) does not, because `verify_request` only catches `VerifyAccessTokenError` and `InvalidDpopProofError`. Error messages reach HTTP responses, so keep them generic and free of token contents. Existing messages do not all follow this. The symmetric-algorithm rejection in `verify_access_token` puts the token header's `alg` into the message, and `_build_www_authenticate` writes the description into the header without escaping. The token header and payload parse errors and both signature verification errors (access token and DPoP proof) interpolate the underlying exception text. Do not copy either pattern.
 - **Anonymous callers:** tokens with `sub` starting `anon@` verify like any token. Authorization is the integrator's call. The SDK must not silently accept or reject them.
 - **Dependency scanning:** Snyk (`sca_scan.yml`, from `requirements.txt`, on push to `main` or `master` only), CodeQL (`codeql.yml`), and ruff `S` (bandit) rules in CI.
 - **Vulnerability reports:** go through Auth0's Responsible Disclosure Program (README "Vulnerability Reporting"), never a public issue or PR.
@@ -137,7 +137,7 @@ pytest + pytest-asyncio + pytest-httpx, in `tests/`. The default `poetry run pyt
 
 ## Code Style
 
-CI-enforced via `.ruff.toml`: rule sets `E, W, F, I, B, C4, UP, S, PLC0415` (imports at module top level), isort import order, `target-version` kept equal to the `pyproject.toml` Python floor, `S101`/`S105`/`S106` allowed only under `tests/`. `E501` is ignored, so `line-length = 100` is not enforced. `B904` is ignored, so `raise ... from e` is a convention, not lint-enforced. New non-secret string constants in `src/` use `# noqa: S105` with a reason (existing sites predate this and omit it). See [references/code-style.md](references/code-style.md) for naming, error patterns, and examples. Read it before adding a class, method, or error type.
+CI-enforced via `.ruff.toml`: rule sets `E, W, F, I, B, C4, UP, S, PLC0415` (imports at module top level), isort import order, `target-version` kept equal to the `pyproject.toml` Python floor, `S101`/`S105`/`S106` allowed only under `tests/`. `E501` is ignored, so `line-length = 100` is not enforced. `B904` is ignored, so `raise ... from e` is a convention, not lint-enforced. New non-secret string constants in `src/` use `# noqa: S105` with a reason (existing sites omit the reason, and some also omit the colon). See [references/code-style.md](references/code-style.md) for naming, error patterns, and examples. Read it before adding a class, method, or error type.
 
 ## Git Workflow
 
@@ -145,7 +145,7 @@ Branches `feat/`, `fix/`, `docs/`, `chore/`, `release/<version>`. Commits use Co
 
 ## Common Pitfalls
 
-Common failures include the `pyproject.toml` Python floor (no `X | None` while it is below 3.10), `ruff format` not being a CI gate, a missing `@pytest.mark.asyncio`, function-level imports (`PLC0415`), and `custom_fetch` covering only discovery/JWKS (those fetches also have no `options.timeout`). See [references/pitfalls.md](references/pitfalls.md). Read it when a command, test, or CI job behaves unexpectedly.
+Common failures include the `pyproject.toml` Python floor (no syntax newer than it), `ruff format` not being a CI gate, a missing `@pytest.mark.asyncio`, function-level imports (`PLC0415`), and `custom_fetch` covering only discovery/JWKS (those fetches also have no `options.timeout`). See [references/pitfalls.md](references/pitfalls.md). Read it when a command, test, or CI job behaves unexpectedly.
 
 ## Docs Update Rules
 

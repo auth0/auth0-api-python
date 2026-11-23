@@ -3,8 +3,9 @@
 The install, CI test, and lint commands match `.github/workflows/test.yml` (Poetry and Python versions are set there). `poetry install`, `poetry run pytest`, and `poetry build` also appear in `CONTRIBUTING.md`. The rest are local conveniences that no CI step runs.
 
 ```bash
-# Install dependencies and the package (CI runs both steps)
+# Install dependencies (CI runs this only on a venv cache miss)
 poetry install --no-interaction --no-root
+# Install the package (CI runs this every time)
 poetry install --no-interaction
 
 # Run all unit tests (CI command)
@@ -38,4 +39,4 @@ find . -path ./.venv\* -prune -o -name __pycache__ -type d -prune -exec rm -rf {
 - **No typecheck command.** mypy/pyright are not in `pyproject.toml` and no CI step runs them.
 - **No integration/e2e tier.** The suite runs on `pytest-httpx` mocks, and nothing in `src/`, `tests/`, or CI reads Auth0 tenant credentials.
 
-`publish.yml` (manual `workflow_dispatch`) builds, runs the RL scanner, and publishes to PyPI.
+`publish.yml` (manual `workflow_dispatch`) builds and runs the RL scanner, creates the GitHub release, then builds and publishes to PyPI.

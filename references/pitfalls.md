@@ -4,8 +4,7 @@
 2. **Python floor compatibility.**
    - **Where the version lives.** The floor is the `python` constraint under `[tool.poetry.dependencies]` in `pyproject.toml`. `.ruff.toml` `target-version` and the `test.yml` matrix hard-code their own versions and do not follow it, so check all three agree, and raise a mismatch rather than fixing CI or ruff config yourself (Ask First).
    - **CI coverage.** The CI matrix pins the minor version only, so it tests the latest patch release, not the exact floor patch.
-   - **Syntax limits.** Avoid syntax newer than the floor. While it is below 3.10, that means no `X | Y` type unions at runtime and no `match` statements.
-   - **`ada-url`.** It has separate version constraints above and below 3.10 in `pyproject.toml`.
+   - **Syntax limits.** Avoid syntax newer than the floor.
 3. **Async tests need `@pytest.mark.asyncio`.**
    - **Why.** No `asyncio_mode` is set in `pyproject.toml`, so pytest-asyncio runs in strict mode and ignores an unmarked async test.
    - **Symptom.** Depending on the pytest version it fails with an "async def functions are not natively supported" message or is skipped with a warning. If a new async test fails that way or shows as skipped, check the marker first.

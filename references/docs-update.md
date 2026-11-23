@@ -21,7 +21,7 @@ A PR that changes public API, configuration, or integration patterns is not comp
 | `ApiClientOptions` parameter added, removed, or default changed | `README.md` (setup and the DPoP "Configuration Options" example if DPoP-related), plus `docs/Caching.md` for `cache_*` or `docs/MultipleCustomDomain.md` for `domain` / `domains` |
 | `CacheAdapter` interface or `InMemoryCache` behaviour | `docs/Caching.md` ("CacheAdapter API", "Default Behavior") |
 | Domain resolver context, MCD validation, or resolver errors | `docs/MultipleCustomDomain.md`, `README.md` section 7 |
-| Bearer/DPoP verification behaviour or error codes | `README.md` section 6, `EXAMPLES.md` (Bearer, DPoP sections) |
+| Bearer/DPoP verification behaviour or error codes | `README.md` sections 3 and 6, `EXAMPLES.md` (Bearer, DPoP sections) |
 | Token exchange (connection, exchange profile, OBO, client credentials) behaviour or errors | `README.md` sections 4 and 5, `EXAMPLES.md` "On Behalf Of Token Exchange", "Client Credentials for Server-to-Server Calls", "Access Token for a Connection (Token Vault)" |
 | `token_store`, `scope_matching`, the `AbstractTokenStore` / `IndexedTokenStore` interface, cache keys, or the expiry buffer | `docs/TokenStorage.md`, `README.md` sections 4 and 5, `EXAMPLES.md` caching samples |
 | `organization_policy` / `organization_id` behaviour or their errors, or when `get_token_on_behalf_of` / `get_access_token_for_connection` verify the incoming token | `docs/OrganizationPolicy.md` (incl. "Token Exchange"), `README.md` section 9 |

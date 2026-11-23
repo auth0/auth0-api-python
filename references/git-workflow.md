@@ -12,7 +12,7 @@ Conventional Commits prefixes (`feat:`, `fix:`, `docs:`, `chore:`, `test:`, `ref
 
 `.github/PULL_REQUEST_TEMPLATE.md` sections:
 
-- **Changes:** what and why, endpoints added or changed, classes/methods added, changed, or deprecated, screenshots of UI changes, a usage summary for public API changes, and alternative designs considered
+- **Changes:** what and why, endpoints and classes/methods added, deleted, deprecated, or changed, screenshots of UI changes, a usage summary for public API changes, and alternative designs considered
 - **References:** supporting links (tickets, community posts)
 - **Testing:** how to test, with checkboxes for unit coverage, integration coverage, and latest-platform testing
 - **Checklist:** Auth0 contribution guidelines, Code of Conduct, all tests passing
