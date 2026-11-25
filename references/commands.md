@@ -20,10 +20,10 @@ poetry run pytest --no-cov -q
 # Lint (CI-enforced)
 poetry run ruff check .
 
-# Auto-fix lint issues (review the diff, keep it scoped to your change)
+# Auto-fix lint issues (review the diff and keep it scoped to your change)
 poetry run ruff check . --fix
 
-# Show formatting state only (not a CI gate, never apply repo-wide)
+# Show formatting state only (not a CI gate, so never apply it repo-wide)
 poetry run ruff format --check .
 
 # Build sdist and wheel into dist/

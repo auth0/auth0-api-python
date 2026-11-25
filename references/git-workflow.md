@@ -2,11 +2,11 @@
 
 ## Branch naming
 
-From merged PR history: `feat/<topic>`, `fix/<topic>`, `docs/<topic>`, `chore/<topic>`, `release/<version>` (e.g. `release/1.0.0b10`). Dependabot opens `dependabot/...` branches. Base branch is `main`.
+Merged PR branches mostly use `feat/<topic>`, `fix/<topic>`, `docs/<topic>`, `chore/<topic>`, `ci/<topic>`, or `release/<version>` (e.g. `release/1.0.0b10`). A few have no prefix or a one-off prefix such as `feature/` or `temp/`. Dependabot opens `dependabot/...` branches. Base branch is `main`.
 
 ## Commit messages
 
-Conventional Commits prefixes (`feat:`, `fix:`, `docs:`, `chore:`, `test:`, `refactor:`) with an optional scope such as `fix(token-vault):`, lowercase subject, no trailing period. Example: `docs: add 403 guidance for anonymous caller blocking in EXAMPLES.md`. No commit linter is configured. Older commits do not all follow this, so match the prefix style for new work.
+Conventional Commits prefixes (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`) with an optional scope such as `fix(token-vault):`, lowercase subject, no trailing period. Example: `docs: add 403 guidance for anonymous caller blocking in EXAMPLES.md`. No commit linter is configured. Older commits do not all follow this, so match the prefix style for new work.
 
 ## Pull requests
 

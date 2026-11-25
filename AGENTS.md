@@ -10,7 +10,7 @@ You are a Python SDK engineer on auth0-api-python, the async library APIs use to
 
 - **Think before coding.** State assumptions. When a request is ambiguous, surface the interpretations and ask before building.
 - **Simplicity first.** Write the minimum code that solves the stated problem. No speculative options, single-use abstractions, or error handling for impossible states.
-- **Surgical changes.** Every changed line traces to the request. Clean up imports your change orphaned, leave pre-existing dead code alone.
+- **Surgical changes.** Every changed line traces to the request. Clean up imports your change orphaned. Leave pre-existing dead code alone.
 - **Verify before done.** Turn the request into a checkable criterion (e.g. "reject X" becomes a failing test for X, then a fix) and run it before claiming success.
 
 ---
@@ -79,6 +79,7 @@ Before changing a flow (Bearer/DPoP verification, token exchange, MCD, caching),
 - Changing an existing error's `get_error_code()` string, `ApiError.code`, or `get_status_code()`. Integrators branch on these and they surface in `WWW-Authenticate`, so treat them as public API. Adding a new error code is not breaking.
 - Adding or bumping dependencies (`pyproject.toml`, `poetry.lock`, `requirements.txt`). Include a license check, since `.snyk` waives `jwcrypto` (LGPL-3.0) by name. After approval, update `requirements.txt` in the same change for any package it lists. The SCA scan installs from it, not from Poetry, and it is a partial list (`authlib`, `httpx`, `ada-url`, `freezegun`, and the pytest packages, without `cryptography`, `jwcrypto`, `requests` or `ruff`).
 - Modifying public API signatures or `ApiClientOptions` defaults (e.g. `dpop_enabled`, `dpop_required`, `organization_policy`, `scope_matching`, cache TTL/size, `timeout`).
+- Changing the `Auth0-Client` or `User-Agent` header names or contents, or the accepted `client_info` shape (`telemetry.py`). Wrapper SDKs pass `client_info` to name themselves in the header (`README.md` section 10).
 - Changes to token, DPoP, issuer, or domain validation logic, the allowed algorithm lists, `RESERVED_PARAMS`, or `normalize_domain`.
 - Changes to CI/CD configuration (`.github/workflows/`, `.github/actions/`), `.ruff.toml` rule selection, or `.snyk` suppressions.
 - Changing the cache key format or what is stored in a cache (affects custom `CacheAdapter` and `AbstractTokenStore` implementations), including the builders in `_internal/cache_keys.py` and the `TokenSet` shape.
@@ -145,7 +146,7 @@ Branches `feat/`, `fix/`, `docs/`, `chore/`, `release/<version>`. Commits use Co
 
 ## Common Pitfalls
 
-Common failures include the `pyproject.toml` Python floor (no syntax newer than it), `ruff format` not being a CI gate, a missing `@pytest.mark.asyncio`, function-level imports (`PLC0415`), and `custom_fetch` covering only discovery/JWKS (those fetches also have no `options.timeout`). See [references/pitfalls.md](references/pitfalls.md). Read it when a command, test, or CI job behaves unexpectedly.
+Common failures include the `pyproject.toml` Python floor (no syntax newer than it), `ruff format` not being a CI gate, a missing `@pytest.mark.asyncio`, function-level imports (`PLC0415`), and `custom_fetch` covering only discovery/JWKS (without `custom_fetch`, those fetches use the httpx default timeout instead of `options.timeout`). See [references/pitfalls.md](references/pitfalls.md). Read it when a command, test, or CI job behaves unexpectedly.
 
 ## Docs Update Rules
 

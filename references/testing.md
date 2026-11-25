@@ -18,7 +18,7 @@ poetry run pytest tests/test_api_client.py -k dpop  # filter by name
 
 - Module-level `test_<subject>_<condition>` functions (e.g. `test_verify_access_token_fail_no_iss`), often with a one-line docstring, grouped under `# ===== Section =====` comment banners in every file except `test_act.py`. No test classes.
 - Async tests are marked explicitly with `@pytest.mark.asyncio`. No `asyncio_mode` is configured, so an unmarked `async def test_...` will not run as intended.
-- Assert error types with `pytest.raises(VerifyAccessTokenError)` and similar. Where both exist, assert on `get_error_code()` / `.code` and `get_status_code()` rather than message text. Codes are the contract, messages are not.
+- Assert error types with `pytest.raises(VerifyAccessTokenError)` and similar. Where both exist, assert on `get_error_code()` / `.code` and `get_status_code()` rather than message text. Codes are the contract. Messages are not.
 - Test placeholders stay obviously synthetic (`cid`, `csecret`, `auth0.local`). Never paste a real tenant value.
 - Time-dependent tests use `@freeze_time(...)` from freezegun. Cache TTL tests in `test_cache.py` use short real sleeps.
 
